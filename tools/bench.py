@@ -62,6 +62,13 @@ async def main():
                         m = await page.evaluate('demo.measure(0)')
                         ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
                         print('| %s | %s | %s | %d | %.2f | %.1f | %.2f |' % (rname, q, how, m['quads'], m['written']['avg'], m['covered']['avg'], ms), flush=True)
+            # the presets as the page applies them (low and med switch voxel mode on at street level by themselves)
+            for q in ['none', 'low', 'med', 'high']:
+                await page.evaluate('(c) => demo.set(c)', {'view': 'street', 'q': 'high', 'voxel': -1, 'split': False})
+                await page.evaluate('(c) => demo.set(c)', {'q': q} if q != 'none' else {'res': 360})
+                m = await page.evaluate('demo.measure(0)')
+                ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
+                print('| %dx%d | preset %s | %s | %d | %.2f | %.1f | %.2f |' % (m['internal'][0], m['internal'][1], q if q != 'none' else '(the default)', 'voxel mode' if m['voxel'] else 'flat quads', m['quads'], m['written']['avg'], m['covered']['avg'], ms), flush=True)
             await browser.close()
             return
         if a.tricks:

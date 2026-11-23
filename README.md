@@ -76,10 +76,14 @@ the copies.
 | | |
 | --- | --- |
 | `?res=360`, `540`, `720`, `native` (key **R**) | The internal height asked for. The engine takes the largest whole-number scale that does not go below it, so pixels stay square: 3 for 360 on a 1080p screen, 2 for 540; 720 does not divide 1080, so there it comes out native. Where the canvas does not divide evenly there is a thin bar at the edge. |
-| `?q=low` (key **Q**) | 360, [voxel mode](#voxel-mode) on, no bloom, a shorter shadow walk (14 steps, not 48), 4 occlusion samples instead of 16, thin layers skipped. The fastest the page goes. |
-| `?q=med` | 540, everything on. |
+| `?q=low` (key **Q**) | 360, [voxel mode](#voxel-mode) on everywhere, no bloom, a shorter shadow walk (14 steps, not 48), 4 occlusion samples instead of 16, thin layers skipped. The fastest the page goes. |
+| `?q=med` | 540, everything on, and voxel mode whenever the camera is in perspective (street level, where it cuts the fill most). |
 | `?q=high` | Native, everything on: the look in the stills and the film on this page. |
 | no `q` | 360, everything on, flat slices. |
+
+The low and med presets use voxel mode because of one row in the tables on this page: at street level at
+1080p, flat quads cover 137.8 fragments per pixel (668 at the worst pixel) and voxel mode covers 9.2 (38 at
+the worst). Whenever voxel mode is drawing, the badge says so; nothing is switched quietly.
 
 **The case that prompted this.** A reader ran the earlier version of this page, which opened at native
 resolution, on an Intel UHD 630 at 1080p, street level, and reported 74.8 ms a frame (13 frames a second);
@@ -113,6 +117,16 @@ internal pixel.
 | 640x360 | low | flat quads | 23946 | 49.1 | 1.10 | 172 |
 | 640x360 | low | flat quads, hollow slices in strips | 29323 | 29.4 | 1.30 | 201 |
 | 640x360 | low | voxel mode | 6458 | 6.8 | 0.62 | 89 |
+
+And the presets as the page applies them, same view, same two machines (a later and busier run, so compare
+these four with one another):
+
+| preset | internal | drawn as | quads or boxes | covered avg | GPU ms | CPU stand-in ms |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| none (the default) | 640x360 | flat quads | 23946 | 49.1 | 1.72 | 244 |
+| low | 640x360 | voxel mode | 5394 | 9.2 | 0.91 | 107 |
+| med | 960x540 | voxel mode | 5394 | 9.2 | 0.95 | 197 |
+| high | 1920x1080 | flat quads | 59932 | 137.8 | 4.01 | 1239 |
 
 - **Resolution is the big lever.** From native to 360 the flat quads cover 49 fragments per internal pixel
   instead of 138, on a ninth of the pixels: about 25 times fewer fragments in all. The stand-in goes from

@@ -139,9 +139,11 @@
   //   ?res=360 | 540 | 720 | native   the internal height asked for (the default is 360; R steps through them)
   //   ?q=low | med | high             a preset (Q steps through them): low is 360 in voxel mode with no bloom, a
   //                                   shorter shadow walk, fewer occlusion samples and thin layers skipped; med
-  //                                   is 540 with everything on; high is native with everything on
+  //                                   is 540 with everything on, and voxel mode whenever the camera is in
+  //                                   perspective (street level, where it cuts the fill most); high is native
+  //                                   with everything on. The badge shows whenever voxel mode is drawing.
   // A preset only fills in what the address does not set itself.
-  const PRESETS = { low: { res: 360, bloom: 0, cheap: 1, lod: 1, voxel: 1 }, med: { res: 540, bloom: 1, cheap: 0, lod: 0, voxel: -1 }, high: { res: 0, bloom: 1, cheap: 0, lod: 0, voxel: -1 } };
+  const PRESETS = { low: { res: 360, bloom: 0, cheap: 1, lod: 1, voxel: 1 }, med: { res: 540, bloom: 1, cheap: 0, lod: 0, voxel: 2 }, high: { res: 0, bloom: 1, cheap: 0, lod: 0, voxel: -1 } };
   const preset = PRESETS[Q.get('q')] || { res: 360, bloom: 1, cheap: 0, lod: 0, voxel: -1 };
   const height = function (v) { return v === 'native' || v === '0' ? 0 : parseInt(v, 10) || 360; };
   // tod: the time of day, 0 afternoon to 1 dusk; -1 lets it drift by itself (the live page does; a held page stays put)
@@ -156,7 +158,7 @@
   //    pole, a fence rail) come apart first. In perspective the lowest ray on screen is what counts, and height
   //    order also stops being depth order once a ray no longer points down.
   //  - No layer is taller on screen than the fill will cover (48 rows): closer than that, gaps open between copies.
-  // S.voxel: -1 the engine decides, 1 always, 0 never. With voxel mode allowed the camera may go down to the horizon.
+  // S.voxel: -1 the engine decides, 1 always, 0 never, 2 always with the perspective camera (the med preset). With voxel mode allowed the camera may go down to the horizon.
   const VOXEL_TILT = 15 * Math.PI / 180, VOXEL_MARGIN = 4 * Math.PI / 180, VOXEL_ROWS = 48;
   let voxel = false, rowsSeen = 0;
   function tiltLimit() { return cam.mode === 'persp' ? cam.fov / 2 + VOXEL_MARGIN : VOXEL_TILT; }      // perspective: the highest ray on screen must still come down, with a little to spare
@@ -165,7 +167,7 @@
     // without voxel mode: in perspective every view ray must still point downward (height order is depth order only then)
     const lowest = S.voxel !== 0 || S.unclamped ? 0.03 : cam.mode === 'persp' ? cam.fov / 2 + 0.06 : 0.1;
     cam.pitch = Math.max(lowest, Math.min(Math.PI / 2 - 0.001, cam.pitch)); cam.dist = Math.max(16, Math.min(1100, cam.dist));
-    voxel = S.voxel === 1 || (S.voxel < 0 && needVoxel());
+    voxel = S.voxel === 1 || (S.voxel === 2 && cam.mode === 'persp') || ((S.voxel < 0 || S.voxel === 2) && needVoxel());
   }
   // The film: six shots with cuts between them, 22 seconds. Two in the parallel view, turning over the whole map:
   // first the picture, then the same picture as a heat map of fragments written (whole stacks, shell stacks,
@@ -316,7 +318,7 @@
       s.iw + ' x ' + s.ih + ' internal' + (scale > 1 ? ', shown x' + scale + ' on ' + canvas.width + ' x ' + canvas.height : '') + (S.q ? '   quality ' + S.q : '') + '   R, Q change it',
       (cam.mode === 'persp' ? 'perspective' : 'parallel') + ' camera, tilt ' + Math.round(cam.pitch * 180 / Math.PI) + '°   ' + tod,
       (voxel ? 'VOXEL MODE: a box per slice, depth test' : S.hsr ? 'hidden-surface removal: top first, depth test' : 'painter order: bottom first, no depth test') + '   ' + (S.shell ? 'shell' : 'whole') + ' stacks' + (voxel ? '' : (S.fill ? '' : '   fill off') + (S.guard ? '' : '   guard off')),
-      'voxel mode (each slice a box with sides) ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? ' (forced on)' : S.voxel === 0 ? ' (forced off)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
+      'voxel mode (each slice a box with sides) ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? (S.q === 'low' ? ' (the low preset)' : ' (forced on)') : S.voxel === 0 ? ' (forced off)' : S.voxel === 2 && cam.mode === 'persp' ? ' (the med preset, in perspective)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
       th(s.slices) + ' slices, ' + th(s.instances) + (voxel ? ' boxes' : ' quads') + (sprites.length ? ' (' + sprites.length + ' of them impostors)' : ''),
       'also faster:  2 impostors ' + (!S.impostors ? 'off' : sprites.length ? 'on, ' + Math.round(sheet.bytes / 1048576) + ' MB' : cam.mode === 'persp' ? 'on (parallel camera only)' : !(S.hsr || voxel) ? 'on (need the depth test)' : 'on (baking)') + '   3 skip thin layers ' + (S.lod ? 'on' : 'off') + '   4 hollow slices in strips ' + (S.split ? 'on' : 'off') + (S.cheap ? '   cheap shadows' : ''),
       s.written ? 'fragments per pixel: ' + f1(s.written.avg) + ' written (' + Math.round(s.written.max) + ' max), ' + f1(s.covered.avg) + ' covered (' + Math.round(s.covered.max) + ' max)' : 'fragments per pixel: press M to measure',
