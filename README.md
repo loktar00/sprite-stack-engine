@@ -91,6 +91,27 @@ resolution, on an Intel UHD 630 at 1080p, street level, and reported 74.8 ms a f
 Those are his numbers, not ours: we have no such machine. They say the frame is bound by fill, not by
 lighting, and the fragment counts in this README say the same.
 
+**A real integrated GPU.** Measured by the project's owner on a laptop: Intel Iris Xe (i7-1195G7), Edge 158,
+ANGLE on D3D11, Balanced power plan, plugged in. Street view, 1920x1080 window, `demo.bench` over 120 frames,
+this page as published.
+
+| setting | internal | drawn as | quads or boxes | covered avg | ms/frame | frames a second |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| the default | 640x360 | flat quads | 23946 | 49.1 | 4.4 | 227 |
+| `?q=low` | 640x360 | voxel mode | 5394 | 9.2 | 3.7 | 270 |
+| `?q=med` | 960x540 | voxel mode | 5394 | 9.2 | 5.6 | 179 |
+| `?q=high` | 1920x1080 | flat quads | 59932 | 137.8 | 16.6 | 60 |
+| high, shadows, occlusion and bloom off | 1920x1080 | flat quads | 59932 | 137.8 | 11.9 | 84 |
+| high, voxel mode | 1920x1080 | voxel mode | 5394 | 9.2 | 13.7 | 73 |
+| high, voxel mode, shadows, occlusion and bloom off | 1920x1080 | voxel mode | 5394 | 9.2 | 9.0 | 111 |
+
+On this chip the light pass and the resolution are what count. At 1080p, switching the lighting off saves
+about 4.7 ms with flat quads and with voxel mode alike, while voxel mode, which covers a fifteenth of the
+fragments, saves about 3. Flat slices at native 1080p with everything on still hold 60 frames a second here,
+and the default runs at 227. The reader's UHD 630 is an older and slower chip, and his numbers stand as his:
+there the slice pass weighed far more (lighting off saved him 13 ms of 75). Two machines, two different
+balances, and the same lever on both: draw fewer pixels.
+
 **What we can measure.** The street view, at three internal resolutions, with the lighting of the high and
 of the low preset, drawn three ways (`tools/bench.py --weak`, and again with `--software`). "GPU" is the RTX
 5090 used throughout, 200 frames. "CPU stand-in" is SwiftShader, a software rasteriser, 3 frames a row on a
@@ -135,7 +156,8 @@ these four with one another):
   and is 2 to 2.5 times faster than flat quads on the stand-in in every row. (The voxel rows here also use
   the strips described below, which is why they show 6.8 and not 9.) The low preset (360, voxel
   mode, cheap lighting) takes the stand-in from 1010 ms to 89, eleven times.
-- **Lighting is the small one**, as the reader found: the low preset's lighting saves about a tenth.
+- **Lighting is the small one on these two machines**, as the reader found on his: the low preset's
+  lighting saves about a tenth. (On the Iris Xe above it is the larger share. It depends on the chip.)
 
 **Is it the `discard`?** Partly, and it cannot be fixed from inside flat slices. The slice shader throws
 away empty texels, so the GPU cannot write depth before running it; whether it still *tests* depth early is
