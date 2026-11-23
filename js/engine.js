@@ -251,6 +251,8 @@
   uniform vec4 u_fx;          // shadow softness (0: no shadows), occlusion strength, how far the lamps are lit, cloud shadows
   uniform vec4 u_view;        // the direction to the sun on screen (xy, pixels), where the haze starts, how deep it is
   uniform vec4 u_tone;        // exposure, haze strength, 1 for the perspective camera
+  uniform vec4 u_walk;        // the shadow walk: steps, how much each grows, the longest, the reach
+  uniform float u_dirs;       // ambient occlusion: directions sampled (8, or 4 at one distance for the low preset)
   uniform float u_water;      // the palette index of water
   uniform vec4 u_lamp[${LAMPS}]; uniform vec3 u_lampCol[${LAMPS}];
   uniform vec4 u_blob[${BLOBS}]; uniform float u_blobLow[${BLOBS}]; uniform int u_nblob;
@@ -320,9 +322,10 @@
       // a fine dither that stays put on the ground)
       float d = 0.0, ds = 1.3, jit = 0.78 + 0.44 * hash(floor(p.xy) + floor(p.z) * 7.31);
       for (int i = 0; i < ${STEPS}; i++) {
-        d += ds * jit; ds = min(ds * 1.09, 4.6);
+        if (float(i) >= u_walk.x) break;
+        d += ds * jit; ds = min(ds * u_walk.y, u_walk.z);
         vec3 s = q + u_sun * d;
-        sh = min(sh, mix(clamp((s.z - land(s.xy)) / (u_fx.x * d), 0.0, 1.0), 1.0, smoothstep(${REACH}.0 * 0.7, ${REACH}.0, d)));
+        sh = min(sh, mix(clamp((s.z - land(s.xy)) / (u_fx.x * d), 0.0, 1.0), 1.0, smoothstep(u_walk.w * 0.7, u_walk.w, d)));
         if (sh <= 0.0 || s.z > 125.0) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
@@ -348,10 +351,12 @@
     if (u_fx.y > 0.0) {
       vec2 c0 = p.xy + n.xy * 3.0; float occ = 0.0;
       for (int i = 0; i < 8; i++) {
-        float an = float(i) * 0.7854 + 0.4; vec2 dir = vec2(cos(an), sin(an));
-        occ += clamp((land(c0 + dir * 2.5) - p.z - 1.0) / 2.5, 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * 7.5) - p.z - 1.0) / 7.5, 0.0, 1.0) * 0.45;
+        if (float(i) >= u_dirs) break;
+        float an = float(i) * 6.2832 / u_dirs + 0.4; vec2 dir = vec2(cos(an), sin(an));
+        if (u_dirs > 4.5) occ += clamp((land(c0 + dir * 2.5) - p.z - 1.0) / 2.5, 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * 7.5) - p.z - 1.0) / 7.5, 0.0, 1.0) * 0.45;
+        else occ += clamp((land(c0 + dir * 4.5) - p.z - 1.0) / 4.5, 0.0, 1.0);
       }
-      ao = 1.0 - occ / 8.0;
+      ao = 1.0 - occ / u_dirs;
       if (n.z < 0.6) ao *= mix(0.68, 1.0, smoothstep(0.0, 7.0, p.z - land(p.xy + n.xy * 4.5)));
       ao = mix(1.0, max(ao, 0.25), u_fx.y);
     }
@@ -555,26 +560,31 @@
         const src = voxel && !one && !it.each ? st.runs : st.slices;
         const a = one ? it.only : 0, b = one ? it.only + 1 : src.length, shx = it.shx || 0, shy = it.shy || 0;
         // (a layer with no side, flat ground, needs no fill: it is drawn once, at the top of its layer)
-        if (n + (b - a) * copies > cap) { while (n + (b - a) * copies > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
+        if (n + (b - a) * copies * 4 > cap) { while (n + (b - a) * copies * 4 > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
           if (skip > 1 && (b - 1 - s) % skip) continue;
           const sl = src[s], first = sl.sides ? 0 : copies - 1; let x0 = it.x, y0 = it.y, z0 = it.z + (one ? 0 : sl.z * sc), rot = it.rot, k1 = sc;
           if (it.each) { const m = it.each(sl.z, st.n, moved); if (!m) continue; x0 += m.dx; y0 += m.dy; z0 += m.dz; rot += m.rot; k1 *= m.scale; }
           slices++;
-          if (voxel) {
-            // VOXEL MODE: one box per slice or run, as tall as the layers it stands for (paper thin, at the top of its layer, for ground with no side)
-            const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
-            tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 : 0); tmp[j + 3] = rot;
-            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1;
-            keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
-            continue;
-          }
-          for (let k = first; k < copies; k++) {
-            const z = z0 + k / copies * k1, j = n * FL, up = z - it.z;
-            tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
-            tmp[j + 4] = sl.u; tmp[j + 5] = sl.v; tmp[j + 6] = sl.w; tmp[j + 7] = sl.h; tmp[j + 8] = sl.ox; tmp[j + 9] = sl.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
-            let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
-            keys[n++] = key;
+          // a hollow slice is drawn as the strips round its hole (see art.js), unless that is switched off
+          const parts = opt.split ? sl.parts : sl.whole;
+          for (let pi = 0; pi < parts.length; pi++) {
+            const pt = parts[pi];
+            if (voxel) {
+              // VOXEL MODE: one box per slice or run, as tall as the layers it stands for (paper thin, at the top of its layer, for ground with no side)
+              const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
+              tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 : 0); tmp[j + 3] = rot;
+              tmp[j + 4] = pt.u; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1;
+              keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
+              continue;
+            }
+            for (let k = first; k < copies; k++) {
+              const z = z0 + k / copies * k1, j = n * FL, up = z - it.z;
+              tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
+              tmp[j + 4] = pt.u; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
+              let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
+              keys[n++] = key;
+            }
           }
         }
       }
@@ -651,13 +661,17 @@
       return m;
     }
 
-    // opt: { cam, list, atlas, hsr, fill, guard, voxel (draw boxes instead of flat quads), lod (skip layers thinner than a pixel), impostors (items drawn as sprites: needs the depth test and the parallel camera), heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
+    // opt: { cam, list, atlas, hsr, fill, guard, voxel (draw boxes instead of flat quads), lod (skip layers thinner than a pixel),
+    //        split (hollow slices as strips round their hole), cheap (shorter shadow walk, fewer occlusion samples), impostors (items drawn as sprites: needs the depth test and the parallel camera), heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
     //        internal pixel), shadows, ao, bloom, water (palette index), time (seconds),
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
     //        lamps [[x, y, z, reach, r, g, b]], blobs [[x, y, top, radius, bottom]] }
     E.render = function (opt) {
       const t0 = performance.now(), W = canvas.width, H = canvas.height, env = opt.light;
-      targets(Math.max(1, Math.round(W / opt.scale)), Math.max(1, Math.round(H / opt.scale)));
+      // the picture is drawn at 1 / scale of the canvas (scale: a whole number) and shown scale times larger, each
+      // internal pixel a clean square, centred, with a thin bar where the canvas does not divide evenly
+      const scale = Math.max(1, Math.round(opt.scale));
+      targets(Math.max(1, Math.floor(W / scale)), Math.max(1, Math.floor(H / scale)));
       const M = cameraMatrices(opt.cam, iw / ih), n = build(opt.list, M, opt);
       if (timerExt && !query) { query = gl.createQuery(); gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query); timing = true; }
       gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, n * FL), gl.DYNAMIC_DRAW);
@@ -699,7 +713,9 @@
       // the sun's direction as it lies on the screen, two pixels long (for the rim)
       const sx = M.r[0] * sun[0] + M.r[1] * sun[1], sy = M.u[0] * sun[0] + M.u[1] * sun[1] + M.u[2] * sun[2], sl = Math.hypot(sx, sy) || 1;
       gl.uniform4f(u.u_view, sx / sl * 2, sy / sl * 2, M.back - 140, 760);
-      gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0); gl.uniform1f(u.u_water, opt.water || -9);
+      gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0);
+      // the full walk: ${STEPS} steps to ${REACH} units, 16 occlusion samples. cheap: 14 longer steps to 90 units, 4 samples
+      if (opt.cheap) { gl.uniform4f(u.u_walk, 14, 1.22, 9, 90); gl.uniform1f(u.u_dirs, 4); } else { gl.uniform4f(u.u_walk, STEPS, 1.09, 4.6, REACH); gl.uniform1f(u.u_dirs, 8); } gl.uniform1f(u.u_water, opt.water || -9);
       const lamps = new Float32Array(LAMPS * 4), lampCol = new Float32Array(LAMPS * 3), blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS);
       opt.lamps.slice(0, LAMPS).forEach(function (l, i) { lamps.set(l.slice(0, 4), i * 4); lampCol.set(l.slice(4, 7), i * 3); });
       opt.blobs.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
@@ -713,7 +729,8 @@
       }
 
       // to the canvas: the lit picture with its bloom, or the overdraw heat map, scaled up without smoothing
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.activeTexture(gl.TEXTURE0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.viewport((W - iw * scale) >> 1, (H - ih * scale) >> 1, iw * scale, ih * scale); gl.activeTexture(gl.TEXTURE0);
       if (opt.heat) { gl.useProgram(pHeat.p); gl.bindTexture(gl.TEXTURE_2D, countTex); gl.uniform1i(pHeat.u.u_count, 0); gl.uniform1i(pHeat.u.u_channel, opt.heat - 1); gl.uniform1f(pHeat.u.u_unit, UNIT); }
       else {
         gl.useProgram(pPost.p); gl.bindTexture(gl.TEXTURE_2D, lit); gl.uniform1i(pPost.u.u_tex, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bloom[0]); gl.uniform1i(pPost.u.u_bloom, 1);

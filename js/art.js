@@ -122,6 +122,26 @@
       for (let y = A.y0; y < A.y0 + A.h; y++) for (let i = (y * def.w + A.x0) * 4, e = i + A.w * 4; i < e; i++) if (A.px[i] !== B.px[i]) return false;
       return true;
     };
+    // Hollow slices in parts. A shell slice of a house is a thin frame round a large hole, but its quad is the
+    // whole rectangle, and the rasteriser walks every pixel of it. Find the largest empty rectangle inside the
+    // slice (the classic histogram method); if it is a good share of the slice, the slice becomes up to four
+    // strips round the hole. Same pixels drawn, far fewer covered.
+    const strips = function (L, sl) {
+      const w = L.w, h = L.h, up = new Int32Array(w); let best = 0, bx = 0, by = 0, bw = 0, bh = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) up[x] = L.px[((L.y0 + y) * def.w + L.x0 + x) * 4] ? 0 : up[x] + 1;      // empty pixels above and at (x, y)
+        const stack = [];
+        for (let x = 0; x <= w; x++) {
+          const cur = x < w ? up[x] : 0; let from = x;
+          while (stack.length && stack[stack.length - 1][1] >= cur) { const t = stack.pop(), area = t[1] * (x - t[0]); if (area > best) { best = area; bx = t[0]; bw = x - t[0]; bh = t[1]; by = y - t[1] + 1; } from = t[0]; }
+          stack.push([from, cur]);
+        }
+      }
+      if (w * h < 48 || best < w * h * 0.3) return [sl];
+      const parts = [], add = function (x, y, pw, ph) { if (pw > 0 && ph > 0) parts.push({ u: sl.u + x, v: sl.v + y, w: pw, h: ph, ox: sl.ox - w / 2 + x + pw / 2, oy: sl.oy - h / 2 + y + ph / 2 }); };
+      add(0, 0, w, by); add(0, by + bh, w, h - by - bh); add(0, by, bx, bh); add(bx + bw, by, w - bx - bw, bh);
+      return parts;
+    };
     let prev = null;
     for (let z = 0; z < def.layers; z++) {
       const L = v.layers[z]; if (!L) { prev = null; continue; }
@@ -130,11 +150,11 @@
       // sides: false when no pixel of the layer lies on its outline. That only happens in a ground tile (the
       // neighbouring tiles continue it): such a layer has a top but no side, and the engine draws it once.
       const sl = { z: z, n: 1, u: at[0], v: at[1], w: L.w, h: L.h, ox: L.x0 + L.w / 2 - def.w / 2, oy: L.y0 + L.h / 2 - def.h / 2, sides: L.sides };
-      st.slices.push(sl);
+      sl.whole = [sl]; sl.parts = shell ? strips(L, sl) : sl.whole; st.slices.push(sl);
       // Runs: layers that repeat the one under them (courses of a wall, a trunk, a pole) are one slab, up to
       // three layers tall. The engine's slab drawing uses this list instead of the slices.
       const run = st.runs[st.runs.length - 1];
-      if (prev && run.n < 3 && L.sides && same(L, prev)) run.n++; else st.runs.push({ z: z, n: 1, u: sl.u, v: sl.v, w: sl.w, h: sl.h, ox: sl.ox, oy: sl.oy, sides: sl.sides });
+      if (prev && run.n < 3 && L.sides && same(L, prev)) run.n++; else { const r = { z: z, n: 1, u: sl.u, v: sl.v, w: sl.w, h: sl.h, ox: sl.ox, oy: sl.oy, sides: sl.sides, parts: sl.parts }; r.whole = [r]; st.runs.push(r); }
       prev = L;
     }
     return st;

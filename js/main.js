@@ -1,11 +1,12 @@
 // main.js: the demo. Builds the village, moves what moves, flies the camera, shows the numbers.
 //
 // Mouse: drag turns and tilts, shift-drag or right-drag pans, wheel zooms.
-// Keys: V (or 1) voxel mode (by itself, on, off), 2 impostors, 3 skip thin layers; Z build, X dismantle, C lower walls; P perspective / parallel, H hidden-surface removal, O overdraw heat map (written, covered, off), M measure,
-//       R internal resolution (1x, 1/2, 1/3), L shell stacks, T thickness fill, G edge guard,
+// Keys: R internal resolution (360, 540, 720, native), Q quality preset (low, med, high), 4 hollow slices in strips;
+//       V (or 1) voxel mode (by itself, on, off), 2 impostors, 3 skip thin layers; Z build, X dismantle, C lower walls; P perspective / parallel, H hidden-surface removal, O overdraw heat map (written, covered, off), M measure,
+//       L shell stacks, T thickness fill, G edge guard,
 //       S shadows, A ambient occlusion, B bloom, N time of day (drifting, afternoon, golden hour, dusk),
 //       Space stops and starts the slow turn, U hides the read-out.
-// The same switches work in the address, for capture: ?mode=persp&hsr=1&heat=1&res=2&shell=0&fill=1&guard=1&tod=0.6
+// The same switches work in the address, for capture: ?mode=persp&hsr=1&heat=1&res=540&q=low&shell=0&fill=1&guard=1&tod=0.6
 //   &yaw=..&pitch=..&dist=..&tx=..&ty=..   ?view=street   ?tour plays the camera move   ?hud=1.6 enlarges the read-out
 //   ?voxel=1 / 0 forces voxel mode on / off   ?unclamped lets flat slices go below their limits, to see them fail
 //   ?nohud hides it   ?hold stops the clock (demo.seek(frame))   ?voxel=1&impostors=1&lod=1 the faster ways to draw
@@ -133,10 +134,21 @@
   const v0 = VIEWS[Q.get('view') || Q.get('fx') || 'overview'] || VIEWS.overview;
   const cam = { tz: v0.tz || 0, mode: Q.get('mode') || v0.mode, tx: num('tx', v0.tx), ty: num('ty', v0.ty), yaw: num('yaw', v0.yaw), pitch: num('pitch', v0.pitch), dist: num('dist', v0.dist), fov: 40 * Math.PI / 180 };
   const TOURING = Q.has('tour'), HELD = Q.has('hold'), FOLLOW = num('follow', -1);
+  // Resolution and quality. The picture is drawn small and shown large, each internal pixel a clean square: that
+  // is how pixel art is meant to be seen, and the cost of a frame goes with the number of pixels drawn.
+  //   ?res=360 | 540 | 720 | native   the internal height asked for (the default is 360; R steps through them)
+  //   ?q=low | med | high             a preset (Q steps through them): low is 360 in voxel mode with no bloom, a
+  //                                   shorter shadow walk, fewer occlusion samples and thin layers skipped; med
+  //                                   is 540 with everything on; high is native with everything on
+  // A preset only fills in what the address does not set itself.
+  const PRESETS = { low: { res: 360, bloom: 0, cheap: 1, lod: 1, voxel: 1 }, med: { res: 540, bloom: 1, cheap: 0, lod: 0, voxel: -1 }, high: { res: 0, bloom: 1, cheap: 0, lod: 0, voxel: -1 } };
+  const preset = PRESETS[Q.get('q')] || { res: 360, bloom: 1, cheap: 0, lod: 0, voxel: -1 };
+  const height = function (v) { return v === 'native' || v === '0' ? 0 : parseInt(v, 10) || 360; };
   // tod: the time of day, 0 afternoon to 1 dusk; -1 lets it drift by itself (the live page does; a held page stays put)
-  const S = { hsr: num('hsr', 1) === 1, heat: num('heat', 0), res: num('res', 1), shell: num('shell', 1) === 1, fill: num('fill', 1) === 1, guard: num('guard', 1) === 1,
-    voxel: num('voxel', -1), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', 0) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', 1) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
-  let list = [], sprites = [], sheet = null, blobs = [], lamps = [], frame = 0, env = Scene.light(0), autoScale = 1;
+  const S = { q: PRESETS[Q.get('q')] ? Q.get('q') : '', cheap: num('cheap', preset.cheap) === 1, split: num('split', 0) === 1,
+    hsr: num('hsr', 1) === 1, heat: num('heat', 0), res: Q.has('res') ? height(Q.get('res')) : preset.res, shell: num('shell', 1) === 1, fill: num('fill', 1) === 1, guard: num('guard', 1) === 1,
+    voxel: num('voxel', preset.voxel), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', preset.lod) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', preset.bloom) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
+  let list = [], sprites = [], sheet = null, blobs = [], lamps = [], frame = 0, env = Scene.light(0), scale = 1;
 
   // ---------------------------------------------------------------- voxel mode: when
   // Flat slices stay solid while two things hold (both measured: see "Voxel mode" in the README).
@@ -282,24 +294,31 @@
     const baked = S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
     sprites.length = 0; sheet = baked;
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
-    E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: S.res * autoScale,
+    E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t });
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);
   }
 
-  // The canvas is as large as the window in device pixels; the picture inside it is kept to about two million
-  // pixels (the light pass is paid per pixel, and a 4K screen has four times that).
-  function fit() { const d = window.devicePixelRatio || 1; canvas.width = Math.round(window.innerWidth * d); canvas.height = Math.round(window.innerHeight * d); autoScale = Math.max(1, Math.sqrt(canvas.width * canvas.height / 2.4e6)); }
+  // The canvas is as large as the window in device pixels. The picture is drawn at a whole fraction of that: the
+  // largest whole-number scale that keeps the internal height at or above the one asked for (1080 / 360 = 3;
+  // 720 does not divide 1080, so on a 1080p screen it comes out native). Native is still kept to about two and a
+  // half million pixels, since the light pass is paid per pixel and a 4K screen has over eight million.
+  function fit() {
+    const d = window.devicePixelRatio || 1; canvas.width = Math.round(window.innerWidth * d); canvas.height = Math.round(window.innerHeight * d);
+    scale = S.res ? Math.max(1, Math.floor(canvas.height / S.res)) : 1;
+    while (canvas.width * canvas.height / (scale * scale) > 2.6e6) scale++;
+  }
   function showHud(ms) {
     const s = E.stats, f1 = function (v) { return v === null || v === undefined ? '-' : v.toFixed(v < 10 ? 2 : 1); }, th = function (v) { return String(v).replace(/\B(?=(\d{3})+$)/g, ','); };
     const tod = env.t < 0.3 ? 'afternoon' : env.t < 0.82 ? 'golden hour' : 'dusk';
     statsEl.textContent = [
-      s.iw + ' x ' + s.ih + (s.iw !== canvas.width ? ' (shown at ' + canvas.width + ' x ' + canvas.height + ')' : '') + '   ' + (cam.mode === 'persp' ? 'perspective' : 'parallel') + ' camera, tilt ' + Math.round(cam.pitch * 180 / Math.PI) + '°   ' + tod,
+      s.iw + ' x ' + s.ih + ' internal' + (scale > 1 ? ', shown x' + scale + ' on ' + canvas.width + ' x ' + canvas.height : '') + (S.q ? '   quality ' + S.q : '') + '   R, Q change it',
+      (cam.mode === 'persp' ? 'perspective' : 'parallel') + ' camera, tilt ' + Math.round(cam.pitch * 180 / Math.PI) + '°   ' + tod,
       (voxel ? 'VOXEL MODE: a box per slice, depth test' : S.hsr ? 'hidden-surface removal: top first, depth test' : 'painter order: bottom first, no depth test') + '   ' + (S.shell ? 'shell' : 'whole') + ' stacks' + (voxel ? '' : (S.fill ? '' : '   fill off') + (S.guard ? '' : '   guard off')),
-      'voxel mode ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? ' (forced on)' : S.voxel === 0 ? ' (forced off)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
+      'voxel mode (each slice a box with sides) ' + (voxel ? 'on' : 'off') + (S.voxel === 1 ? ' (forced on)' : S.voxel === 0 ? ' (forced off)' : voxel ? (rowsSeen > VOXEL_ROWS ? ' (a layer is ' + Math.round(rowsSeen) + ' rows tall, over ' + VOXEL_ROWS + ')' : ' (the view is under ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') : ' (flat slices hold above ' + Math.round(tiltLimit() * 180 / Math.PI) + '\u00b0)') + '   V changes it',
       th(s.slices) + ' slices, ' + th(s.instances) + (voxel ? ' boxes' : ' quads') + (sprites.length ? ' (' + sprites.length + ' of them impostors)' : ''),
-      'faster ways:  V voxel mode (each slice a box with sides) ' + (voxel ? 'on' : 'off') + '   2 impostors ' + (!S.impostors ? 'off' : sprites.length ? 'on, ' + Math.round(sheet.bytes / 1048576) + ' MB' : cam.mode === 'persp' ? 'on (parallel camera only)' : !(S.hsr || voxel) ? 'on (need the depth test)' : 'on (baking)') + '   3 skip thin layers ' + (S.lod ? 'on' : 'off'),
+      'also faster:  2 impostors ' + (!S.impostors ? 'off' : sprites.length ? 'on, ' + Math.round(sheet.bytes / 1048576) + ' MB' : cam.mode === 'persp' ? 'on (parallel camera only)' : !(S.hsr || voxel) ? 'on (need the depth test)' : 'on (baking)') + '   3 skip thin layers ' + (S.lod ? 'on' : 'off') + '   4 hollow slices in strips ' + (S.split ? 'on' : 'off') + (S.cheap ? '   cheap shadows' : ''),
       s.written ? 'fragments per pixel: ' + f1(s.written.avg) + ' written (' + Math.round(s.written.max) + ' max), ' + f1(s.covered.avg) + ' covered (' + Math.round(s.covered.max) + ' max)' : 'fragments per pixel: press M to measure',
       'slice effects:  Z build   X dismantle   C lower walls near the view ' + (FX.on ? 'on' : 'off'),
       'frame ' + f1(ms) + ' ms' + (s.gpuMs !== null ? '   gpu ' + f1(s.gpuMs) + ' ms' : '') + '   build ' + f1(s.cpuMs) + ' ms' + (S.measure || S.heat ? '   (with the count pass)' : '')
@@ -320,7 +339,9 @@
   window.addEventListener('keydown', function (e) {
     const k = e.key.toLowerCase();
     if (k === 'p') cam.mode = cam.mode === 'persp' ? 'ortho' : 'persp'; else if (k === 'h') S.hsr = !S.hsr; else if (k === 'o') S.heat = (S.heat + 1) % 3;
-    else if (k === 'r') { S.res = S.res % 3 + 1; resByHand = true; } else if (k === 'l') S.shell = !S.shell; else if (k === 't') S.fill = !S.fill; else if (k === 'g') S.guard = !S.guard;
+    else if (k === 'r') { S.res = S.res === 360 ? 540 : S.res === 540 ? 720 : S.res === 720 ? 0 : 360; S.q = ''; fit(); }
+    else if (k === 'q') quality(S.q === 'low' ? 'med' : S.q === 'med' ? 'high' : 'low');
+    else if (k === '4') S.split = !S.split; else if (k === 'l') S.shell = !S.shell; else if (k === 't') S.fill = !S.fill; else if (k === 'g') S.guard = !S.guard;
     else if (k === 's') S.shadows = !S.shadows; else if (k === 'a') S.ao = !S.ao; else if (k === 'b') S.bloom = !S.bloom; else if (k === 'm') S.measure = !S.measure;
     else if (k === 'n') S.tod = S.tod < 0 ? 0 : S.tod < 0.3 ? 0.55 : S.tod < 0.8 ? 1 : -1;
     else if (k === ' ') { S.orbit = !S.orbit; v0.yaw = cam.yaw - frame / 60 * 0.06; e.preventDefault(); }
@@ -333,13 +354,11 @@
   canvas.addEventListener('webglcontextlost', function (e) { e.preventDefault(); playing = false; hud.classList.remove('off'); statsEl.textContent = 'The browser lost the WebGL context. Reload the page.'; });
 
   // ---------------------------------------------------------------- the clock, and what capture and measurement call
-  let playing = !HELD, t0 = null, last = 0, smooth = 0, slow = 0, resByHand = Q.has('res');
+  let playing = !HELD, t0 = null, last = 0, smooth = 0;
+  function quality(name) { const p = PRESETS[name]; if (!p) return; S.q = name; S.res = p.res; S.bloom = !!p.bloom; S.cheap = !!p.cheap; S.lod = !!p.lod; S.voxel = p.voxel; fit(); }
   function tick(t) {
     if (playing) {
       if (t0 === null) t0 = t; const dt = t - last; last = t; smooth += (dt - smooth) * 0.1; draw(Math.floor((t - t0) / 1000 * 60)); showHud(smooth);
-      // On hardware that cannot keep up (under about 30 frames a second for a second and a half), render fewer
-      // pixels: the same as pressing R. Once R has been pressed the choice is left alone.
-      slow = smooth > 32 && !S.heat && !S.measure ? slow + 1 : 0; if (slow > 90 && !resByHand && S.res < 3) { S.res++; slow = 0; }
     }
     requestAnimationFrame(tick);
   }
@@ -347,7 +366,7 @@
     frames: Q.has('fx') ? 240 : TOUR, fps: 60, engine: E, cam: cam, state: S, views: VIEWS, scene: Scene,
     ready: Promise.resolve({ frames: Q.has('fx') ? 240 : TOUR, fps: 60 }),
     seek: function (f) { playing = false; fit(); draw(f); draw(f); showHud(E.stats.cpuMs); return f; },      // twice: the choice of voxel mode follows the frame before
-    set: function (o) { Object.keys(o).forEach(function (k) { if (k in S) S[k] = o[k]; else if (k === 'view') { cam.tz = 0; Object.assign(cam, VIEWS[o[k]]); } else cam[k] = o[k]; }); },
+    set: function (o) { Object.keys(o).forEach(function (k) { if (k in S && k !== 'q' && k !== 'res') S[k] = o[k]; else if (k === 'view') { cam.tz = 0; Object.assign(cam, VIEWS[o[k]]); } else if (k === 'q') quality(o[k]); else if (k === 'res') { S.res = height(String(o[k])); S.q = ''; } else cam[k] = o[k]; }); },
     // one frame with the count pass: fragments per pixel, exactly
     measure: function (f) { playing = false; fit(); draw(f || 0); draw(f || 0, true); showHud(E.stats.cpuMs); const s = E.stats; return { canvas: [canvas.width, canvas.height], internal: [s.iw, s.ih], voxel: voxel, rows: s.rows, slices: s.slices, quads: s.instances, written: s.written, covered: s.covered, pixelsHit: s.pixelsHit / s.pixels, exact: s.exact, renderer: E.renderer }; },
     // How far flat slices fail in the current view: draw it as boxes (which are solid from anywhere), then as flat

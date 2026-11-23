@@ -29,6 +29,8 @@ The lighting is one pass over the screen and is written to be read: every effect
 `js/engine.js` and a line [below](#the-light-pass).
 
 Open `index.html` in a browser with WebGL2. It runs from the file system; there is nothing to install or build.
+It opens at a pixel-art 640x360 inside, scaled up; `?q=high` or **Q** gives the native-resolution look of the
+stills here, and `?q=low` is for [weak GPUs](#resolution-and-weak-gpus).
 
 | | |
 | --- | --- |
@@ -42,10 +44,12 @@ Open `index.html` in a browser with WebGL2. It runs from the file system; there 
 | H | hidden-surface removal / painter order |
 | O | overdraw heat map: fragments written, fragments covered, off |
 | M | measure fragments per pixel every frame |
-| R | internal resolution: full, half, third |
+| R | internal resolution: 360 (the default), 540, 720, native |
+| Q | quality preset: low, med, high |
 | L | shell stacks on / off |
 | T | thickness fill on / off |
 | G | edge-on guard on / off |
+| 4 | hollow slices drawn as strips round their hole (off by default: see Weak GPUs) |
 | S, A, B | shadows, ambient occlusion, bloom |
 | N | time of day: drifting, afternoon, golden hour, dusk |
 | Space | stop or start the slow turn |
@@ -53,7 +57,92 @@ Open `index.html` in a browser with WebGL2. It runs from the file system; there 
 
 The page opens on the fast path (hidden-surface removal, shell stacks). **H** shows what it costs without.
 
+## Resolution, and weak GPUs
+
+The page opens at an internal 640x360 on a 1080p screen, shown three times larger with square pixels and no
+smoothing. That is on purpose, twice over.
+
+It is how pixel art is meant to be seen. The art here is authored at about one pixel per layer; drawing it at
+1080p only turns each art pixel into a block of screen pixels and lights every one of them separately.
+
+And it is what makes the page run on weak hardware. The cost of a frame goes with the number of pixels drawn,
+and with flat slices it falls faster than that, because a layer a third as tall on screen needs a third of
+the copies.
+
+![The default: 640x360 internal, shown three times larger](media/default-360.png)
+
+![The same view at native 1920x1080 (?q=high)](media/native-high.png)
+
+| | |
+| --- | --- |
+| `?res=360`, `540`, `720`, `native` (key **R**) | The internal height asked for. The engine takes the largest whole-number scale that does not go below it, so pixels stay square: 3 for 360 on a 1080p screen, 2 for 540; 720 does not divide 1080, so there it comes out native. Where the canvas does not divide evenly there is a thin bar at the edge. |
+| `?q=low` (key **Q**) | 360, [voxel mode](#voxel-mode) on, no bloom, a shorter shadow walk (14 steps, not 48), 4 occlusion samples instead of 16, thin layers skipped. The fastest the page goes. |
+| `?q=med` | 540, everything on. |
+| `?q=high` | Native, everything on: the look in the stills and the film on this page. |
+| no `q` | 360, everything on, flat slices. |
+
+**The case that prompted this.** A reader ran the earlier version of this page, which opened at native
+resolution, on an Intel UHD 630 at 1080p, street level, and reported 74.8 ms a frame (13 frames a second);
+61.8 ms with shadows, occlusion and bloom off; and 7.15 ms (140 frames a second) at an internal 640x360.
+Those are his numbers, not ours: we have no such machine. They say the frame is bound by fill, not by
+lighting, and the fragment counts in this README say the same.
+
+**What we can measure.** The street view, at three internal resolutions, with the lighting of the high and
+of the low preset, drawn three ways (`tools/bench.py --weak`, and again with `--software`). "GPU" is the RTX
+5090 used throughout, 200 frames. "CPU stand-in" is SwiftShader, a software rasteriser, 3 frames a row on a
+busy machine: it stands in for "fill is expensive", and it is **not** a UHD 630 number. Covered is per
+internal pixel.
+
+| internal | lighting | drawn as | quads or boxes | covered avg | GPU ms | CPU stand-in ms |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1920x1080 | high | flat quads | 59932 | 137.8 | 2.55 | 1010 |
+| 1920x1080 | high | flat quads, hollow slices in strips | 75102 | 80.7 | 2.94 | 977 |
+| 1920x1080 | high | voxel mode | 6458 | 6.8 | 1.09 | 447 |
+| 1920x1080 | low | flat quads | 59932 | 137.8 | 2.34 | 936 |
+| 1920x1080 | low | flat quads, hollow slices in strips | 75102 | 80.7 | 2.80 | 883 |
+| 1920x1080 | low | voxel mode | 6458 | 6.8 | 0.88 | 368 |
+| 960x540 | high | flat quads | 33360 | 71.1 | 1.38 | 334 |
+| 960x540 | high | flat quads, hollow slices in strips | 41234 | 42.1 | 1.63 | 348 |
+| 960x540 | high | voxel mode | 6458 | 6.8 | 0.74 | 151 |
+| 960x540 | low | flat quads | 33360 | 71.1 | 1.30 | 313 |
+| 960x540 | low | flat quads, hollow slices in strips | 41234 | 42.1 | 1.60 | 316 |
+| 960x540 | low | voxel mode | 6458 | 6.8 | 0.72 | 130 |
+| 640x360 | high | flat quads | 23946 | 49.1 | 1.16 | 202 |
+| 640x360 | high | flat quads, hollow slices in strips | 29323 | 29.4 | 1.26 | 226 |
+| 640x360 | high | voxel mode | 6458 | 6.8 | 0.67 | 98 |
+| 640x360 | low | flat quads | 23946 | 49.1 | 1.10 | 172 |
+| 640x360 | low | flat quads, hollow slices in strips | 29323 | 29.4 | 1.30 | 201 |
+| 640x360 | low | voxel mode | 6458 | 6.8 | 0.62 | 89 |
+
+- **Resolution is the big lever.** From native to 360 the flat quads cover 49 fragments per internal pixel
+  instead of 138, on a ninth of the pixels: about 25 times fewer fragments in all. The stand-in goes from
+  1010 ms to 202.
+- **Voxel mode is the second.** A box per slice covers 7 to 9 fragments per pixel whatever the resolution,
+  and is 2 to 2.5 times faster than flat quads on the stand-in in every row. (The voxel rows here also use
+  the strips described below, which is why they show 6.8 and not 9.) The low preset (360, voxel
+  mode, cheap lighting) takes the stand-in from 1010 ms to 89, eleven times.
+- **Lighting is the small one**, as the reader found: the low preset's lighting saves about a tenth.
+
+**Is it the `discard`?** Partly, and it cannot be fixed from inside flat slices. The slice shader throws
+away empty texels, so the GPU cannot write depth before running it; whether it still *tests* depth early is
+up to the driver. WebGL2 has no counter for fragment-shader runs (there are no pipeline statistics), so
+"fragments shaded" cannot be measured in the page: all that can be said is that it lies between written
+(1.09) and covered (138). We tried the clean fix that stays with flat slices: a shell slice of a house is a
+thin frame round a large hole, so draw it as up to four strips round the hole instead of one rectangle (key
+**4**, `?split=1`; the "hollow slices in strips" rows). Covered falls from 138 to 81 at 1080p and not one
+pixel of the picture changes. It did not pay on either machine we have: there are a quarter more quads to
+build and sort, and the frame went from 2.55 to 2.94 ms on the GPU and from 1010 to 977 ms on the stand-in.
+It is off by default. On a GPU that is purely fill-bound it may pay; we could not test that. What does pay
+is not drawing the copies at all, which is voxel mode.
+
+**Send numbers.** If you have an integrated GPU, open the page, go to street level (**P**, zoom in), press
+**M**, and note the frame time at the default, with `?q=low` and with `?res=native`; or run
+`python tools/bench.py --weak`. An issue with the GPU's name and those numbers would be welcome, good or bad.
+
 ## Measured
+
+Everything in this section is measured at native resolution (`?res=native`), which is the hard case, not at
+the 360 the page opens with.
 
 1920x1080 canvas, headless Chromium, one desktop GPU (NVIDIA RTX 5090, ANGLE on Vulkan). "Overview" is the
 parallel camera over the whole map; "street" is the perspective camera low on the road by the tank, the worst
@@ -381,9 +470,9 @@ of that surface pixel, and height. The light pass then runs once per screen pixe
 rebuilds the world position by intersecting the pixel's view ray with the plane at the stored height.
 Lighting cost does not grow with overdraw.
 
-**Internal resolution.** The slice and light passes can run at a half or a third of the canvas size and are
-scaled up without smoothing, for a pixel-art look or for slower hardware. On a screen with more than about
-2.4 million pixels the page lowers it by itself.
+**Internal resolution.** The slice and light passes run at a whole fraction of the canvas size (a third on a 1080p screen by default) and are
+scaled up without smoothing, each internal pixel a clean square. Native is kept to about two and a half
+million pixels, so a 4K screen is drawn at half size.
 
 **The count pass.** The same instances are drawn again into a 16-bit float target with additive blending,
 adding 1 per fragment: once with the same tests as the real pass (written) and once with none (covered). The
@@ -490,6 +579,7 @@ python tools/bench.py                 # GPU
 python tools/bench.py --software      # CPU rasteriser
 python tools/bench.py --voxel         # voxel mode: its cost, and where flat slices open gaps
 python tools/bench.py --tricks        # voxel mode, impostors, skipping thin layers
+python tools/bench.py --weak          # resolutions, presets and ways of drawing, for slow GPUs (add --software)
 sh tools/encode.sh                    # out/tour.mp4, out/tour.gif and out/fx-*.gif (needs ffmpeg)
 ```
 

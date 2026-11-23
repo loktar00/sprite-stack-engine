@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bench.py: measure the demo and print a table. Also saves a still of each configuration.
 
-    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel] [--tricks]
+    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel] [--tricks] [--weak]
 
 Needs Playwright (pip install playwright; playwright install chromium). The page runs at 1920x1080 in headless
 Chromium. For each configuration it asks the page for:
@@ -10,6 +10,8 @@ Chromium. For each configuration it asks the page for:
 --software forces the CPU rasteriser (SwiftShader), where fill cost is not hidden by a fast GPU.
 --voxel measures voxel mode instead: what it costs beside flat slices where both hold (street), and what each
 shows where flat slices do not (level: nearly along the ground), then how many gaps flat slices open, tilt by tilt.
+--weak is for slow GPUs: the street view at three internal resolutions, with the lighting of the high and of the low preset, with
+hollow slices drawn whole and in strips, and in voxel mode. Add --software for a CPU rasteriser as a stand-in.
 --tricks measures the faster ways to draw (voxel mode, impostors, skipping thin layers): each alone and all
 together, against plain quads, with hidden-surface removal and shell stacks on throughout.
 """
@@ -17,11 +19,11 @@ import argparse, asyncio, json, os, pathlib
 from playwright.async_api import async_playwright
 
 VIEWS = ['overview', 'street']
-RES = [(1, 'native 1920x1080'), (2, 'internal 960x540')]
+RES = [('native', 'native 1920x1080'), (540, 'internal 960x540')]
 ORDERS = [(0, 0, 'painter, whole stacks'), (0, 1, 'painter, shell stacks'), (1, 0, 'hidden-surface, whole stacks'), (1, 1, 'hidden-surface, shell stacks')]
 # the faster ways: (voxel mode, impostors, skip thin layers, name), and where: (view, internal resolution divisor, name)
 TRICKS = [(0, 0, 0, 'flat quads (none)'), (1, 0, 0, 'voxel mode (each slice a box with sides)'), (0, 1, 0, 'impostors'), (0, 0, 1, 'skip thin layers'), (1, 1, 0, 'voxel mode + impostors'), (1, 1, 1, 'all three')]
-PLACES = [('overview', 1, 'overview, 1920x1080'), ('street', 1, 'street, 1920x1080'), ('far', 3, 'far (whole map small), internal 640x360')]
+PLACES = [('overview', 'native', 'overview, 1920x1080'), ('street', 'native', 'street, 1920x1080'), ('far', 360, 'far (whole map small), internal 640x360')]
 
 
 async def main():
@@ -31,6 +33,7 @@ async def main():
     ap.add_argument('--software', action='store_true')
     ap.add_argument('--voxel', action='store_true')
     ap.add_argument('--tricks', action='store_true')
+    ap.add_argument('--weak', action='store_true')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     url = (pathlib.Path(__file__).resolve().parent.parent / 'index.html').as_uri() + '?hold'
@@ -48,6 +51,19 @@ async def main():
         except Exception:
             print('the page did not start; errors:', errors[:5])
             raise SystemExit(1)
+        if a.weak:
+            print('renderer:', await page.evaluate('demo.engine.renderer'))
+            print('| internal | preset | drawn as | quads or boxes | written avg | covered avg | ms/frame |')
+            print('| --- | --- | --- | ---: | ---: | ---: | ---: |')
+            for res, rname in [('native', '1920x1080'), (540, '960x540'), (360, '640x360')]:
+                for q in ['high', 'low']:
+                    for vox, split, how in [(0, False, 'flat quads, slices whole'), (0, True, 'flat quads, hollow slices in strips'), (1, True, 'voxel mode')]:
+                        await page.evaluate('(c) => demo.set(c)', {'view': 'street', 'q': q, 'res': res, 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox, 'split': split, 'lod': False, 'impostors': False})
+                        m = await page.evaluate('demo.measure(0)')
+                        ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
+                        print('| %s | %s | %s | %d | %.2f | %.1f | %.2f |' % (rname, q, how, m['quads'], m['written']['avg'], m['covered']['avg'], ms), flush=True)
+            await browser.close()
+            return
         if a.tricks:
             rows = []
             for view, res, place in PLACES:
@@ -71,7 +87,7 @@ async def main():
             print('| --- | --- | ---: | ---: | ---: | ---: | ---: |')
             for view, name in [('overview', 'overview, tilt 41'), ('street', 'street, tilt 25'), ('level', 'level, tilt 8')]:
                 for vox, how in [(0, 'flat slices'), (1, 'voxel mode')]:
-                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': 1, 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox, 'unclamped': True})
+                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': 'native', 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox, 'unclamped': True})
                     m = await page.evaluate('demo.measure(0)')
                     ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
                     g = await page.evaluate('demo.holes(0)')
@@ -96,7 +112,7 @@ async def main():
                     m = await page.evaluate('demo.measure(0)')
                     ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
                     rows.append(dict(view=view, res=res_name, order=name, ms=ms, **m))
-                    tag = '%s-res%d-hsr%d-shell%d' % (view, res, hsr, shell)
+                    tag = '%s-res%s-hsr%d-shell%d' % (view, res, hsr, shell)
                     await page.evaluate('demo.seek(0)'); await page.screenshot(path=os.path.join(a.out, tag + '.png'))
                     await page.evaluate('(c) => { demo.set(c); demo.measure(0); }', {'heat': 1}); await page.screenshot(path=os.path.join(a.out, tag + '-heat.png'))
         await browser.close()

@@ -92,6 +92,15 @@ build (slices drop in, lowest first), dismantle (slices fly off the top, spin an
 building open (leave out every slice above a sliding height, so the room inside shows). Patch the height map
 as the object changes so shadows and occlusion follow. Nothing can fade: the G-buffer is opaque, so shrink.
 
+## Weak GPUs: draw small, show large
+
+A stack scene is bound by fill long before it is bound by lighting. Default to a pixel-art internal
+resolution (360 lines) at a whole-number scale with nearest sampling, and offer native as a choice: from 1080
+to 360 lines the flat quads here cover about 25 times fewer fragments, because there are a ninth of the
+pixels and each layer needs a third of the copies. Offer a low preset (small, voxel mode, short shadow walk,
+few occlusion samples, no bloom). Splitting hollow slices into strips cuts covered fragments but adds quads:
+measure before keeping it; here it did not pay.
+
 ## Measuring overdraw (never estimate it)
 
 Draw the same instances again into a float target with additive blending, adding 1 per fragment, then read it
