@@ -591,8 +591,26 @@ its definition draws it that much smaller, so a detailed close-up model fits in.
 the layer heights already scaled; an item with an effect may set `reach`, how far the effect moves slices,
 for culling.
 
-**Hordes.** `Engine.itemPool()` hands out the same item objects every frame, so thousands of moving stacks
-make no garbage for the collector:
+**Hordes.** A game that keeps its units in typed arrays hands them to the engine as they are, with no object
+per unit: `opt.horde` is a list of groups.
+
+```js
+const bots = { frames: walkFrames,          // one stack per frame of the walk
+  n: count, x: xs, y: ys, z: null, rot: headings,   // Float32Array (z null: on the ground)
+  frame: frameOf,                           // Uint8Array, an index into frames
+  row: rowOf,                               // Uint8Array or null: the palette row (see below)
+  fade: null,                               // Uint8Array or null: 0..255
+  scale: 1 };
+E.render({ ..., list: list, horde: [bots] });
+```
+
+The engine walks the arrays inside its own build loop: each unit is culled and written to the instance buffer
+like an item, with nothing allocated. 6000 three-layer birds (`?bots=6000` in the demo) cost the engine 0.39 ms
+more a frame on the machine of the table below, about 0.065 ms per thousand; the same through item
+objects costs about the same, so the typed path is mainly about the game not having to keep objects at all.
+
+`Engine.itemPool()` is the other way, for games that do want objects: it hands out the same items every frame,
+so thousands of moving stacks make no garbage for the collector:
 
 ```js
 const pool = Engine.itemPool();
@@ -606,6 +624,13 @@ function frame() {
   E.render({ ..., list: list });
 }
 ```
+
+**Palette rows.** `E.setPalette(bytes, rows)` takes up to 64 rows of 256 colours (`bytes` is 256 x rows x 4).
+An item's `row`, or a horde's `row` array, picks the row it is drawn in: a hit flash, a unit powered down, a
+building under construction, all from the same stack in the atlas. The row rides in the instance (in the
+fraction of its atlas line), and while the palette has more than one row the slice pass writes it to a third,
+one-byte target that the light pass reads. With one row nothing changes and nothing extra is drawn. In the
+demo, `?bots=3000&rows=1` draws every other bird in a second, red-hot row.
 
 Animation is a choice of stack: build one stack per frame of a walk or a flap, and pick the frame from each
 thing's phase. A moving horde then costs no more than a standing one. What it does cost is the slices: every
@@ -722,7 +747,7 @@ python tools/bench.py --software      # CPU rasteriser
 python tools/bench.py --voxel         # voxel mode: its cost, and where flat slices open gaps
 python tools/bench.py --tricks        # voxel mode, impostors, skipping thin layers
 python tools/bench.py --weak          # resolutions, presets and ways of drawing, for slow GPUs (add --software)
-python tools/bench.py --hordes        # 0 to 5000 vehicles, 0 to 256 point lights, 0 to 16 cone lights
+python tools/bench.py --hordes        # 0 to 5000 vehicles, 0 to 256 point lights, 0 to 16 cone lights, 0 to 6000 birds (opt.horde)
 sh tools/encode.sh                    # out/tour.mp4, out/tour.gif and out/fx-*.gif (needs ffmpeg)
 ```
 

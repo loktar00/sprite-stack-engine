@@ -26,7 +26,9 @@
     Object.keys(Characters).forEach(function (c) { chars[c] = {}; Characters[c].parts.forEach(function (d) { chars[c][d.name] = Art.buildStack(d, pal, atlas, shell); }); });
     SETS.push({ stacks: stacks, chars: chars, atlas: E.makeAtlas(atlas.data, atlas.size), pixels: atlas.used });
   });
-  E.setPalette(pal.bytes());
+  // ?rows=1: a second palette row (every colour pushed to a hot red-white, a hit flash) that half the ?bots birds use
+  if (Q.has('rows')) { const b = pal.bytes(), two = new Uint8Array(b.length * 2); two.set(b); for (let i = 0; i < 256; i++) { const o = b.length + i * 4; two[o] = 255; two[o + 1] = Math.min(255, 90 + b[i * 4 + 1]); two[o + 2] = Math.min(255, 60 + b[i * 4 + 2] * 0.5); two[o + 3] = 255; } E.setPalette(two, 2); }
+  else E.setPalette(pal.bytes());
 
   const LAYOUT = Scene.layout();
   const statics = SETS.map(function (S) { return LAYOUT.map(function (l) { return { stack: S.stacks[l.n], x: l.x, y: l.y, z: l.z, rot: l.rot, scale: l.scale, only: -1, sway: l.sway, shx: 0, shy: 0 }; }); });
@@ -157,11 +159,24 @@
   //   ?lights=N   a point light on N of them, spread through the columns (up to 256): 8 shadowed by the height map, all with a halo
   //   ?cones=N    searchlights on N of them (up to 16): a pool and a beam each, cut by the map's trees and buildings
   // e.g. ?horde=2000&lights=256&cones=16&tod=1 (a convoy at dusk). bench.py --hordes measures them.
+  //   ?bots=N     N small birds (3 layers, 4 wing frames) skimming the fields, drawn from typed arrays (opt.horde:
+  //               no object per bird); ?botsobj=1 draws the same through the item pool, to compare
+  const BOTS = Math.max(0, num('bots', 0) | 0), BOTSOBJ = num('botsobj', 0) === 1;
+  const bot = { frames: null, n: BOTS, x: new Float32Array(BOTS), y: new Float32Array(BOTS), z: new Float32Array(BOTS), rot: new Float32Array(BOTS), frame: new Uint8Array(BOTS), fade: null, row: Q.has('rows') ? new Uint8Array(BOTS).map(function (v, i) { return i & 1; }) : null, scale: 1 }, flock = [bot];
+  function bots(t, set) {
+    if (!bot.frames) bot.frames = ['bird0', 'bird1', 'bird2', 'bird1'].map(function (k) { return set.stacks[k]; });
+    const W = Scene.WORLD.w - 40, H = Scene.WORLD.h - 40;
+    for (let i = 0; i < BOTS; i++) {
+      const v = 10 + (i % 7) * 1.5, dir = i & 1 ? -1 : 1, x = 20 + ((((i * 37.3 + dir * t * v) % W) + W) % W), y = 20 + (i * 0.618034 * H) % H + Math.sin(t * 1.3 + i) * 4;
+      bot.x[i] = x; bot.y[i] = y; bot.z[i] = Scene.groundAt(x, y) + 4 + (i % 5); bot.rot[i] = dir > 0 ? 0 : Math.PI; bot.frame[i] = (Math.floor(t * 10 + i) & 3);
+      if (BOTSOBJ) pool.add(bot.frames[bot.frame[i]], x, y, bot.z[i], bot.rot[i], 1).row = bot.row ? bot.row[i] : 0;
+    }
+  }
   const HORDE = Math.max(0, num('horde', 0) | 0), NLIGHTS = Math.max(0, num('lights', 0) | 0), NCONES = Math.max(0, num('cones', 0) | 0);
   const pool = Engine.itemPool(), cones = [];
   let blockers = null;
   function horde(t, set) {
-    pool.begin(list); cones.length = 0;
+    cones.length = 0;
     if (NCONES && !blockers && num("coneshadows", 1)) blockers = statics[0].filter(function (it) { return !it.stack.def.ground && it.stack.n > 12; }).map(function (it) { return [it.x, it.y, it.stack.radius * it.scale * 0.45, it.z + it.stack.n * it.scale]; });
     const W = Scene.WORLD.w - 40, rows = Math.max(1, Math.ceil(HORDE / 60)), lstep = Math.max(1, Math.floor(HORDE / Math.max(1, NLIGHTS))), cstep = Math.max(1, Math.floor(HORDE / Math.max(1, NCONES)));
     for (let i = 0; i < HORDE; i++) {
@@ -313,14 +328,14 @@
       const P = Rig.pose(k.rig), lift = Scene.groundAt(P.x * SCALE, P.y * SCALE); C.draw(Engine.figureWriter(list, SCALE, lift), set.chars.soldier, P);
       blobs.push([P.x * SCALE, P.y * SCALE, lift + C.height * SCALE, 3, lift - 1]);
     });
-    animate(t, set); effects(t); if (HORDE) horde(t, set);
+    animate(t, set); effects(t); pool.begin(list); if (HORDE) horde(t, set); if (BOTS) bots(t, set);
     // impostors only where they hold: the parallel camera, with the depth test on, and once they are baked for this tilt
     const baked = S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
     sprites.length = 0; sheet = baked;
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
     E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
-      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0 });
+      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null });
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);
   }
@@ -405,7 +420,7 @@
       return { gaps: gaps / Math.max(1, seen), pixels: seen, rows: E.stats.rows };
     },
     // n frames one after another, each waited for: milliseconds per frame, everything included
-    bench: function (n) { playing = false; fit(); for (let i = 0; i < 10; i++) { draw(i); E.finish(); } const a = performance.now(); for (let i = 0; i < n; i++) { draw(10 + i); E.finish(); } return (performance.now() - a) / n; }
+    bench: function (n) { playing = false; fit(); for (let i = 0; i < 10; i++) { draw(i); E.finish(); } const a = performance.now(); let c = 0; for (let i = 0; i < n; i++) { draw(10 + i); c += E.stats.cpuMs; E.finish(); } window.demo.cpuMs = c / n; return (performance.now() - a) / n; }
   };
   fit(); draw(0); showHud(0);
   if (Q.has('nohud')) hud.classList.add('off');

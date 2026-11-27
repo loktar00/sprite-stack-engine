@@ -67,11 +67,12 @@
   layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rectf;
   layout(location=3) in vec2 a_off; layout(location=4) in float a_scale; layout(location=5) in vec2 a_corner;
   uniform mat4 u_vp; uniform float u_guard;                 // u_guard: half a pixel, in clip units (0 turns it off)
-  out vec2 v_uv; flat out vec4 v_rect; flat out vec2 v_cs; out float v_h; flat out float v_fade;
+  out vec2 v_uv; flat out vec4 v_rect; flat out vec2 v_cs; out float v_h; flat out float v_fade, v_row;
   void main() {
     vec2 corner = a_corner;                                 // (0,0) (1,0) (0,1) (1,1): the same four for every instance
-    // the slice's rectangle in the atlas starts on a whole texel; the fraction of its first number is half the fade
-    vec4 a_rect = vec4(floor(a_rectf.x), a_rectf.yzw); v_fade = (a_rectf.x - a_rect.x) * 2.0;
+    // the slice's rectangle in the atlas starts on a whole texel; the fraction of its first number is half the fade,
+    // the fraction of its second is its palette row over 64
+    vec4 a_rect = vec4(floor(a_rectf.xy), a_rectf.zw); v_fade = (a_rectf.x - a_rect.x) * 2.0; v_row = floor((a_rectf.y - a_rect.y) * 64.0 + 0.5);
     float c = cos(a_rot), s = sin(a_rot);
     vec2 l = (a_off + (corner - 0.5) * a_rect.zw) * a_scale, m = a_off * a_scale;
     vec4 p = u_vp * vec4(a_pos + vec3(l.x * c - l.y * s, l.x * s + l.y * c, 0.0), 1.0);
@@ -84,6 +85,18 @@
   // FADE: screen-door transparency. An instance with a fade leaves out that share of its pixels in a fixed 4x4
   // (Bayer) pattern, so what is behind it shows through without sorting or blending: a tree between the camera
   // and the player, a wreck sinking out of sight.
+  // PALETTE ROWS. The palette can have several rows (E.setPalette(bytes, rows)): the same art in other colours (a
+  // hit flash, burning, a ghost) without another copy of the stack in the atlas. An instance's row rides in its
+  // rectangle (see VS_SLICE); while there is more than one row the slice pass writes it to a third target, which
+  // the light pass reads. With one row none of this is compiled in (ROWS_ON 0).
+  const ROWS_OUT = `
+  #define ROWS_ON 0
+  #if ROWS_ON
+  layout(location=2) out vec4 o2;
+  #define ROW_WRITE(r) o2 = vec4((r) / 255.0, 0.0, 0.0, 1.0)
+  #else
+  #define ROW_WRITE(r)
+  #endif`;
   const FADED = `
   bool faded(float f) {
     if (f <= 0.0) return false;
@@ -94,8 +107,9 @@
   const FS_G = `#version 300 es
   precision highp float;
   uniform sampler2D u_atlas;
-  in vec2 v_uv; flat in vec4 v_rect; flat in vec2 v_cs; in float v_h; flat in float v_fade;
+  in vec2 v_uv; flat in vec4 v_rect; flat in vec2 v_cs; in float v_h; flat in float v_fade, v_row;
   layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  ${ROWS_OUT}
   ${FADED}
   void main() {
     if (faded(v_fade)) discard;
@@ -105,6 +119,7 @@
     o0 = vec4(t.r, n * 0.5 + 0.5);                          // palette index, facing
     float h = clamp(v_h / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
     o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 0.0);   // height, 16 bits (the other two are voxel mode's)
+    ROW_WRITE(v_row);
   }`;
   const FS_COUNT = `#version 300 es
   precision highp float;
@@ -136,9 +151,9 @@
   layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rectf;
   layout(location=3) in vec2 a_off; layout(location=4) in float a_scale; layout(location=5) in vec3 a_box; layout(location=6) in float a_span;
   uniform mat4 u_vp; uniform vec3 u_eye, u_fwd; uniform float u_ortho;
-  out vec3 v_p, v_d; flat out vec4 v_rect, v_base; flat out vec3 v_how; flat out vec2 v_off; flat out float v_fade;
+  out vec3 v_p, v_d; flat out vec4 v_rect, v_base; flat out vec3 v_how; flat out vec2 v_off; flat out float v_fade, v_row;
   void main() {
-    vec4 a_rect = vec4(floor(a_rectf.x), a_rectf.yzw); v_fade = (a_rectf.x - a_rect.x) * 2.0;     // (the fade: see VS_SLICE)
+    vec4 a_rect = vec4(floor(a_rectf.xy), a_rectf.zw); v_fade = (a_rectf.x - a_rect.x) * 2.0; v_row = floor((a_rectf.y - a_rect.y) * 64.0 + 0.5);     // (fade and row: see VS_SLICE)
     float c = cos(a_rot), s = sin(a_rot);
     vec2 l = (a_off + (a_box.xy - 0.5) * a_rect.zw) * a_scale;
     vec3 w = a_pos + vec3(l.x * c - l.y * s, l.x * s + l.y * c, a_box.z * a_span);
@@ -177,9 +192,10 @@
   const FS_GVOXEL = `#version 300 es
   precision highp float;
   ${WALK}
-  flat in vec2 v_off; flat in float v_fade;
+  flat in vec2 v_off; flat in float v_fade, v_row;
   uniform vec3 u_eye, u_fwd;
   layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  ${ROWS_OUT}
   ${FADED}
   void main() {
     if (faded(v_fade)) discard;
@@ -194,6 +210,7 @@
     vec2 l = (v_off + q.xy - v_rect.zw * 0.5) * v_base.w;
     float far = clamp(dot(vec3(v_base.xy + vec2(l.x * v_how.x - l.y * v_how.y, l.x * v_how.y + l.y * v_how.x), hw) - u_eye, u_fwd) / 4096.0, 0.0, 1.0) * 65535.0, fi = floor(far / 256.0);
     o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, fi / 255.0, (far - fi * 256.0) / 255.0);
+    ROW_WRITE(v_row);
   }`;
   const FS_COUNTVOXEL = `#version 300 es
   precision highp float;
@@ -242,12 +259,14 @@
   precision highp float;
   ${IMP_FS}
   layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  ${ROWS_OUT}
   void main() {
     vec4 a; float hw; if (!sprite(a, hw)) discard;
     float c = cos(v_rot), s = sin(v_rot); vec3 n = a.gba * 2.0 - 1.0; n.xy = vec2(n.x * c - n.y * s, n.x * s + n.y * c);
     o0 = vec4(a.r, n * 0.5 + 0.5);
     float h = clamp(hw / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
     o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 1.0);
+    ROW_WRITE(0.0);
   }`;
   const FS_COUNTIMP = `#version 300 es
   precision highp float;
@@ -269,7 +288,11 @@
   const FS_LIGHT = `#version 300 es
   precision highp float;
   #define CONES_ON 0
+  #define ROWS_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  #if ROWS_ON
+  uniform sampler2D u_g2;     // the palette row of each pixel
+  #endif
   uniform highp sampler2D u_lt;  // the lights' table (float): a column per light, rows 0-2 point lights from the ninth on, rows 3-6 cones
   uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];   // the first eight point lights, as uniforms: the common case reads no texture
   uniform mat4 u_inv;
@@ -378,7 +401,11 @@
     float fade = smoothstep(-24.0, 92.0, length(max(over, 0.0)) + min(max(over.x, over.y), 0.0) + (vnoise(p.xy * 0.012) - 0.5) * 30.0);
     if (fade > 0.995) { o = vec4(finish(u_hazeCol), 0.0); return; }
 
+#if ROWS_ON
+    vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), int(texelFetch(u_g2, px, 0).r * 255.0 + 0.5)), 0);
+#else
     vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), 0), 0);
+#endif
     vec3 alb = outer ? mix(beyond(p.xy), u_outer, smoothstep(0.1, 0.5, fade)) : pal.rgb;      // the made-up fields lose their detail first
     vec3 n = outer ? vec3(0.0, 0.0, 1.0) : normalize(g0.gba * 2.0 - 1.0);
     float glow = outer ? 0.0 : pal.a;
@@ -584,6 +611,12 @@
     const pG = program(VS_SLICE, FS_G), pCount = program(VS_SLICE, FS_COUNT), pLight = program(VS_FULL, FS_LIGHT), pHeat = program(VS_FULL, FS_HEAT);
     const pGVoxel = program(VS_VOXEL, FS_GVOXEL), pCountVoxel = program(VS_VOXEL, FS_COUNTVOXEL);
     const pGImp = program(VS_IMP, FS_GIMP), pCountImp = program(VS_IMP, FS_COUNTIMP);
+    // Builds of a shader with some of its #define NAME 0 switched to 1, made the first time they are needed.
+    const variants = {};
+    function variant(key, vs, fs, on) {
+      if (!variants[key]) { let src = fs; on.forEach(function (d) { src = src.split('#define ' + d + ' 0').join('#define ' + d + ' 1'); }); variants[key] = program(vs, src); }
+      return variants[key];
+    }
     const pBright = program(VS_FULL, FS_BRIGHT), pBlur = program(VS_FULL, FS_BLUR), pPost = program(VS_FULL, FS_POST);
 
     // the four corners of a quad (one small buffer, shared), the instance buffer, and their vertex arrays
@@ -607,8 +640,7 @@
     const vaoFull = gl.createVertexArray(); gl.bindVertexArray(vaoFull); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
 
     // render targets, made again when the internal resolution changes
-    let pLightC = null;                                      // the light pass with cone lights compiled in (see the light pass)
-    let iw = 0, ih = 0, bw = 0, bh = 0, g0, g1, lit, countTex, depth, fboG, fboLit, fboCount, bloom = [], fboBloom = [];
+    let iw = 0, ih = 0, bw = 0, bh = 0, g0, g1, g2, lit, countTex, depth, fboG, fboGR, fboLit, fboCount, bloom = [], fboBloom = [];
     function targets(w, h) {
       if (w === iw && h === ih) return; iw = w; ih = h; bw = Math.max(1, w >> 2); bh = Math.max(1, h >> 2);
       g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
@@ -617,6 +649,10 @@
       fboG = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboG);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+      // the same with the palette row as a third target, for a palette with more than one row
+      g2 = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE); fboGR = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboGR);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, g2, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
       fboLit = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lit, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);      // so the fx hook can test against the slice pass
       fboCount = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, countTex, 0);
@@ -629,7 +665,9 @@
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
 
     E.makeAtlas = function (data, size) { return texture(size, size, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, data); };
-    E.setPalette = function (bytes) { palTex = texture(256, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
+    // the palette: 256 colours (rgb, and a glow in alpha) per row, `rows` rows (1 if not given; at most 64)
+    let palRows = 1;
+    E.setPalette = function (bytes, rows) { palRows = Math.max(1, Math.min(64, rows || 1)); palTex = texture(256, palRows, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
     // the height map for shadows and occlusion: one byte per ground cell, the height of the tallest thing standing
     // on it (in half units). It is read with smoothing, which is what rounds the shadows' edges.
     E.setHeightMap = function (bytes, w, h) { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); world = [w, h]; };
@@ -685,17 +723,37 @@
     // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind),
     // zs (optional: each layer drawn zs times as tall), fade (optional, 0 to 1: the share of its pixels left out),
     // each (optional: function (layer, layers, out) -> out or null, moves or hides single slices: the slice effects),
-    // reach (optional: how far each can move a slice, for culling; 60 if not given) }]
+    // reach (optional: how far each can move a slice, for culling; 60 if not given),
+    // row (optional: the palette row it is drawn in, 0 to 63, see setPalette) }]
+    // horde (optional, opt.horde): [{ frames: [stack, ...], n, x, y, z, rot, frame, fade, row, scale }], thousands of units
+    // as typed arrays with no object per unit: x, y, rot Float32Array; z Float32Array or null (0); frame Uint8Array
+    // or null (an index into frames: a walk or a flap, one stack per frame); fade Uint8Array or null (0..255); row
+    // Uint8Array or null (the palette row: a hit flash, a unit powered down). Each
+    // unit goes through the same culling and instance writing as an item (one scratch item, reused).
     const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
+    const NOHORDE = [], unit = { stack: null, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1, shx: 0, shy: 0, zs: 1, fade: 0, row: 0, each: null, reach: 0 };
     function build(list, M, opt) {
       const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel;
       let n = 0, slices = 0, tallest = 0;
       // A shell stack is hollow, so a shallow view ray must not slip between two copies of a slice and through the
       // shell: the copies have to be closer together than the shell is deep along that ray.
       const slope = Math.tan(Math.max(0.06, M.ortho ? opt.cam.pitch : opt.cam.pitch - opt.cam.fov * 0.35));
-      for (let q = 0; q < list.length; q++) {
+      // the items, then the horde's units one by one through the same body (no closure: n stays a local, and the
+      // instance loops below stay fast)
+      const H = opt.horde || NOHORDE, L = list.length;
+      let gi = 0, ui = 0;
+      for (let q = 0; ; q++) {
+        let it;
+        if (q < L) it = list[q];
+        else {
+          while (gi < H.length && ui >= H[gi].n) { gi++; ui = 0; }
+          if (gi >= H.length) break;
+          const G = H[gi], i = ui++;
+          unit.stack = G.frames[G.frame ? G.frame[i] : 0]; unit.x = G.x[i]; unit.y = G.y[i]; unit.z = G.z ? G.z[i] : 0; unit.rot = G.rot ? G.rot[i] : 0;
+          unit.scale = G.scale || 1; unit.fade = G.fade ? G.fade[i] / 255 : 0; unit.row = G.row ? G.row[i] : 0; it = unit;
+        }
         // sc, zs: the item's scale and how much taller each layer is drawn (zs, optional), with the stack's own sampling (art.js: res, zres)
-        const it = list[q], st = it.stack, sc = it.scale * (st.k || 1), one = it.only >= 0, zs = (it.zs || 1) * (st.kz || 1), zk = (st.k || 1) * (st.kz || 1);
+        const st = it.stack, sc = it.scale * (st.k || 1), one = it.only >= 0, zs = (it.zs || 1) * (st.kz || 1), zk = (st.k || 1) * (st.kz || 1);
         // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
         const zc = one ? it.z : it.z + st.n * sc * zs * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * zs * 0.5)) * sc + (it.each ? it.reach || 60 : 2);      // reach: how far an effect can move slices
         const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15], cx = vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12], cy = vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13];
@@ -720,7 +778,7 @@
         const copies = voxel ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(opt.fill ? rows : 1)));
         // voxel mode draws runs (layers that repeat merged into one taller box) unless an effect moves single slices
         const src = voxel && !one && !it.each ? st.runs : st.slices;
-        const a = one ? it.only : 0, b = one ? it.only + 1 : src.length, shx = it.shx || 0, shy = it.shy || 0, fade = Math.max(0, Math.min(1, it.fade || 0)) * 0.5;      // (half the fade, added to the atlas column: see VS_SLICE)
+        const a = one ? it.only : 0, b = one ? it.only + 1 : src.length, shx = it.shx || 0, shy = it.shy || 0, fade = Math.max(0, Math.min(1, it.fade || 0)) * 0.5, row = it.row > 0 ? Math.min(63, it.row) / 64 : 0;      // (half the fade added to the atlas column, the row over 64 to the atlas line: see VS_SLICE)
         // (a layer with no side, flat ground, needs no fill: it is drawn once, at the top of its layer)
         if (n + (b - a) * copies * 4 > cap) { while (n + (b - a) * copies * 4 > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
@@ -736,14 +794,14 @@
               // VOXEL MODE: one box per slice or run, as tall as the layers it stands for (paper thin, at the top of its layer, for ground with no side)
               const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 * zs : 0); tmp[j + 3] = rot;
-              tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1 * zs;
+              tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v + row; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1 * zs;
               keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
               continue;
             }
             for (let k = first; k < copies; k++) {
               const z = z0 + k / copies * k1 * zs, j = n * FL, up = z - it.z;
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
-              tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
+              tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v + row; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
               let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
               keys[n++] = key;
             }
@@ -842,11 +900,12 @@
       gl.viewport(0, 0, iw, ih); gl.disable(gl.BLEND);
 
       // the slice pass: G-buffer only
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      const pg = opt.voxel ? pGVoxel : pG, pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
+      const rowsOn = palRows > 1;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rowsOn ? fboGR : fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      const pg = rowsOn ? (opt.voxel ? variant('gvr', VS_VOXEL, FS_GVOXEL, ['ROWS_ON']) : variant('gr', VS_SLICE, FS_G, ['ROWS_ON'])) : opt.voxel ? pGVoxel : pG, pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
       const sprites = opt.impostors && opt.impostors.length ? opt.impostors : null;
       drawSlices(pg, n, M, opt, tested);
-      if (sprites) E.stats.instances += drawImpostors(pGImp, sprites, M, opt, true);
+      if (sprites) E.stats.instances += drawImpostors(rowsOn ? variant('gir', VS_IMP, FS_GIMP, ['ROWS_ON']) : pGImp, sprites, M, opt, true);
 
       // the count pass: the same draw again, adding 1 per fragment. Red: fragments written. Green: fragments the quads cover.
       if (opt.measure || opt.heat) {
@@ -868,10 +927,11 @@
       // the light pass: once per pixel
       // (with cones, the build of the shader that has them, made the first time it is needed)
       const ns = Math.min(CONES, (opt.cones || []).length);
-      if (ns && !pLightC) pLightC = program(VS_FULL, FS_LIGHT.replace('#define CONES_ON 0', '#define CONES_ON 1'));
-      const pl = ns ? pLightC : pLight, u = pl.u, sun = env.sun;
+      const on = (ns ? ['CONES_ON'] : []).concat(rowsOn ? ['ROWS_ON'] : []);
+      const pl = on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight, u = pl.u, sun = env.sun;
       gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
+      if (rowsOn) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
       gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
       gl.uniform4f(u.u_world, world[0], world[1], opt.ground || 0, opt.time || 0);
@@ -966,7 +1026,7 @@
       add: function (stack, x, y, z, rot, scale) {
         let it = pool[n]; if (!it) { it = {}; pool.push(it); } n++;
         it.stack = stack; it.x = x; it.y = y; it.z = z || 0; it.rot = rot || 0; it.scale = scale || 1; it.only = -1;
-        it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.each = null; it.reach = 0;
+        it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.row = 0; it.each = null; it.reach = 0;
         out.push(it); return it;
       },
       get size() { return pool.length; }

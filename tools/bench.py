@@ -15,7 +15,8 @@ hollow slices drawn whole and in strips, and in voxel mode. Add --software for a
 --tricks measures the faster ways to draw (voxel mode, impostors, skipping thin layers): each alone and all
 together, against plain quads, with hidden-surface removal and shell stacks on throughout.
 --hordes measures lights and hordes: the street and overview views at dusk with 0 to 5000 vehicles from the item
-pool, and 0 to 256 point lights and 0 to 16 cone lights on them (the page's ?horde, ?lights and ?cones).
+pool, and 0 to 256 point lights and 0 to 16 cone lights on them (the page's ?horde, ?lights and ?cones); then 0 to
+6000 small birds drawn from typed arrays (opt.horde) and through the item pool (?bots, ?botsobj).
 """
 import argparse, asyncio, json, os, pathlib
 from playwright.async_api import async_playwright
@@ -65,9 +66,21 @@ async def main():
                     await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': 'native', 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox})
                     m = await page.evaluate('demo.measure(0)')
                     ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
-                    cpu = await page.evaluate('demo.engine.stats.cpuMs')
+                    cpu = await page.evaluate('demo.cpuMs')
                     await page.evaluate('demo.seek(0)'); await page.screenshot(path=os.path.join(a.out, 'horde-%s-%d-%d-%d.png' % (view, n, nl, nc)))
                     print('| %s%s | %d | %d | %d | %d | %.2f | %.2f |' % (view, ' (voxel mode)' if vox else '', n, nl, nc, m['quads'], cpu, ms), flush=True)
+            print()
+            print('| view | internal | birds | drawn from | quads or boxes | engine CPU ms | ms/frame |')
+            print('| --- | --- | ---: | --- | ---: | ---: | ---: |')
+            for view, vox, res in [('overview', 1, 360), ('overview', 0, 'native')]:
+                for n, obj in [(0, 0), (1000, 0), (1000, 1), (6000, 0), (6000, 1)]:
+                    await page.goto(url + '&bots=%d&botsobj=%d' % (n, obj))
+                    await page.wait_for_function('window.demo && window.demo.ready', timeout=20000)
+                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': res, 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox})
+                    m = await page.evaluate('demo.measure(0)')
+                    ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
+                    cpu = await page.evaluate('demo.cpuMs')
+                    print('| %s%s | %dx%d | %d | %s | %d | %.2f | %.2f |' % (view, ' (voxel mode)' if vox else '', m['internal'][0], m['internal'][1], n, 'item pool' if obj else 'opt.horde (typed arrays)', m['quads'], cpu, ms), flush=True)
             print('errors:', errors[:5])
             await browser.close()
             return
