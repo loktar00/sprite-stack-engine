@@ -703,6 +703,48 @@ from frame to frame) with the rest on. On the desktop of the tables here, the fi
 went from 6 to 13 ms to under 1 ms; a game reported 140 to 190 ms before warming. The demo warms what its
 address asks for (`?nowarm=1` to see the difference).
 
+### Night, and the film look
+
+![The village by a low moon, through the night model and the film post](media/night.png)
+
+Two more opt-in pieces, for a look made of darkness, haze and the lights people carry. With neither set, nothing
+changes. Fed the parameters of the night game they came from, they reproduce its frames: side by side over
+seven moments of its play, the mean difference is under 1 of 765 per pixel at most moments (2 at the busiest),
+and fewer than 0.3 % of pixels differ by more than 30.
+
+**The night model.** `light.model: 'night'` swaps the light pass for one built for night:
+
+| Piece | Parameters (in `light`, unless noted) |
+| --- | --- |
+| A low moon as the key, its shadows walked over the height map with a wide penumbra | `moon` (direction), `moonCol` |
+| A dim hemisphere fill, occlusion, and a canopy (land overhead takes sky away) | `skyCol`, `earthCol` |
+| Height fog: thick at the ground, thinning upward, integrated along each ray, clear near the eye, lit a little towards the moon | `fog: [density, thinning, moon in the haze]`, `fogCol`, `fogNear` |
+| A screen-space rim: silhouette edges catch the moon and the warm lights round them | `rim`, `rimWarm` |
+| Contact shadows under figures the height map does not hold (up to 8) | `opt.contacts: [[x, y, radius, strength]]` |
+| Lamps with a windowed falloff, steep near the source, and a halo that follows the haze | `opt.falloff` (`'window'` by default here; `'linear'` for the day model's), `opt.lampCap` |
+| Palette glow as light, only partly dimmed by the haze | `emissive` |
+| The floor, where no slice was drawn | `floor` (a game's own GLSL: `vec3 floorAt(vec2 p, out vec3 n, out float wet, out float glow)`, with `hash`, `vnoise` and `u_time` to hand, and `floorUniforms(gl, uniforms)` to set its own), else the ground map, else `floorCol` |
+
+Cones, rings, the light map, the ground map and palette rows work in it as in the day model. Its distances
+are those of a scene whose art pixel is a tenth of a metre, scaled by `opt.unit`. It writes linear light (it
+turns the half-float picture on) with the view distance in alpha, which the film post reads.
+
+**The film post.** `opt.post: { bloom, vignette, grain, exposure, knee, grade: [contrast, black, saturation,
+shadow blue], dof: [focus distance, its depth, screen row of the tilt-shift band (below 0: none), strength] }`:
+bloom keyed on brightness above `knee`, a tilt-shift depth of field (crisp at the focus, soft nearer, further,
+and towards the top and bottom of the frame, every internal pixel still square), an ACES-fitted tone curve, the
+grade, a vignette and grain. It runs on the half-float picture; with the day model the light pass then writes
+the view distance in alpha too. The night model always uses it.
+
+**Two layers in the height map.** `E.setHeightMap(bytes, w, h, box, step, 2)`: two bytes a cell, the top of the
+tallest thing and the bottom of its highest solid run, so a crown floats on its trunk and the sun or the moon
+gets in under it (both models).
+
+**The camera's planes.** `cam.near` and `cam.far` set the near and far planes when the defaults (from
+`opt.unit`) do not suit; a coneTable (`opt.coneTable`) gives the cones' shadow tables directly instead of
+blockers. `Engine.create(canvas, { warm })` warms the builds a game will use at once (by default the plain and
+the cone light passes); `E.warm` takes `night`, `floor`, `twoLayer` and `post` too. `?night=1` in the demo.
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.

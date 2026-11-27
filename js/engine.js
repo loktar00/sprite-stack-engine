@@ -48,7 +48,8 @@
   // The camera orbits a point on the ground. yaw turns it, pitch tilts it (90 degrees is straight down), dist zooms.
   // mode 'ortho' is the classic parallel view; 'persp' is a true perspective camera.
   // Sorting by height is exact as long as every view ray points downward, which holds while pitch > fov / 2.
-  // unit (optional, 1 if not given): the size of an art pixel in world units, which sets the near and far planes.
+  // unit (optional, 1 if not given): the size of an art pixel in world units, which sets the near and far planes
+  // (cam.near and cam.far, if given, set them instead).
   function cameraMatrices(cam, aspect, unit) {
     const U = unit || 1;
     const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch), cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
@@ -58,8 +59,8 @@
     const dot = function (a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
     const V = new Float32Array([r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, eye), -dot(u, eye), dot(f, eye), 1]);
     let P;
-    if (ortho) { const hh = cam.dist * th, hw = hh * aspect, n = U, fr = 3200 * U; P = new Float32Array([1 / hw, 0, 0, 0, 0, 1 / hh, 0, 0, 0, 0, -2 / (fr - n), 0, 0, 0, -(fr + n) / (fr - n), 1]); }
-    else { const n = Math.max(2 * U, cam.dist * 0.05), fr = cam.dist * 3 + 1400 * U; P = new Float32Array([1 / (th * aspect), 0, 0, 0, 0, 1 / th, 0, 0, 0, 0, -(fr + n) / (fr - n), -1, 0, 0, -2 * fr * n / (fr - n), 0]); }
+    if (ortho) { const hh = cam.dist * th, hw = hh * aspect, n = cam.near || U, fr = cam.far || 3200 * U; P = new Float32Array([1 / hw, 0, 0, 0, 0, 1 / hh, 0, 0, 0, 0, -2 / (fr - n), 0, 0, 0, -(fr + n) / (fr - n), 1]); }
+    else { const n = cam.near || Math.max(2 * U, cam.dist * 0.05), fr = cam.far || cam.dist * 3 + 1400 * U; P = new Float32Array([1 / (th * aspect), 0, 0, 0, 0, 1 / th, 0, 0, 0, 0, -(fr + n) / (fr - n), -1, 0, 0, -2 * fr * n / (fr - n), 0]); }
     const vp = mul(P, V);
     return { vp: vp, inv: invert(vp), eye: eye, f: f, r: r, u: u, ortho: ortho, th: th, cp: cp, px: P[0], py: P[5], back: back };
   }
@@ -295,7 +296,10 @@
   #define LIGHTMAP_ON 0
   #define HDR_ON 0
   #define RINGS_ON 0
+  #define TWO_ON 0
+  #define FILM_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  uniform float u_falloff;    // 0: the lamps fall off as (1 - r / reach)^2; 1: windowed and steep near the source (opt.falloff)
   #if RINGS_ON
   uniform vec4 u_ring[${RINGS}], u_ringCol[${RINGS}]; uniform float u_ringGlow[${RINGS}]; uniform int u_nr;     // rings: x y z radius / r g b width / the band's own glow
   #endif
@@ -330,6 +334,12 @@
   in vec2 v_uv; out vec4 o;
 
   float land(vec2 p) { return textureLod(u_hm, (p - u_hmBox.xy) / u_hmBox.zw, 0.0).r * u_hmK.x; }      // smoothed between cells
+  // how far a point is clear of the land: above it, or (with a two-layer height map) under a floating crown
+#if TWO_ON
+  float clr(vec3 s) { vec2 h = textureLod(u_hm, (s.xy - u_hmBox.xy) / u_hmBox.zw, 0.0).rg * u_hmK.x; return max(s.z - h.x, h.y - s.z); }
+#else
+  float clr(vec3 s) { return s.z - land(s.xy); }
+#endif
   float height(ivec2 px) { vec4 g = texelFetch(u_g1, clamp(px, ivec2(0), textureSize(u_g1, 0) - 1), 0); return (g.r * 65280.0 + g.g * 255.0) / 65535.0 * ${HMAX}.0; }
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }
@@ -392,6 +402,7 @@
     vec3 d3 = L.xyz - p; float r = length(d3);
     if (r < L.w) {
       float att = 1.0 - r / L.w, occ = 1.0;
+      if (u_falloff > 0.5) { float x = r * r / (L.w * L.w), win = (1.0 - x) * (1.0 - x); att = sqrt(win * win / (1.0 + r * r / max(L.w * L.w * 0.02, 1e-4))); }      // (squared below)
       if (C.w > 0.5) {
         vec3 q = p + vec3(n.xy * (3.5 * u_hmK.z), 1.3 * u_hmK.z), e = L.xyz - q;   // start off the surface, as the sun's walk does
         for (int k = 1; k < 8; k++) { vec3 s = q + e * (float(k) / 8.0); occ = min(occ, clamp((s.z - land(s.xy)) * 0.5 / u_hmK.z + 0.5, 0.0, 1.0)); }
@@ -464,7 +475,7 @@
         if (float(i) >= u_walk.x) break;
         d += ds * jit; ds = min(ds * u_walk.y, u_walk.z);
         vec3 s = q + u_sun * d;
-        sh = min(sh, mix(clamp((s.z - land(s.xy)) / (u_fx.x * d), 0.0, 1.0), 1.0, smoothstep(u_walk.w * 0.7, u_walk.w, d)));
+        sh = min(sh, mix(clamp(clr(s) / (u_fx.x * d), 0.0, 1.0), 1.0, smoothstep(u_walk.w * 0.7, u_walk.w, d)));
         if (sh <= 0.0 || s.z > u_hmK.y) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
@@ -598,8 +609,298 @@
 #if RINGS_ON
     col += ringE * (1.0 - fade);
 #endif
+#if FILM_ON
+    o = vec4(finish(col), dist);                           // the film post: the view distance, for the depth of field
+#else
     o = vec4(finish(col), e * (1.0 - fade));
+#endif
   }`;
+  // ================================================================ THE NIGHT LIGHT MODEL (light.model 'night')
+  // A second light pass, for scenes lit by a low moon and the lights people carry. Same G-buffer, different light:
+  //   moon      the key is a low, cool moon, its shadows walked over the height map (with a two-layer map, a tree's
+  //             crown floats over open air and the moon gets in under it), a wide penumbra, then smoothed
+  //   fill      a hemisphere of sky above and earth below, both dim; occlusion from the height map, and a canopy
+  //             (land overhead) takes sky away
+  //   contact   up to 8 soft dark pools under figures that are not in the height map (opt.contacts)
+  //   rim       a silhouette edge (the next pixel up the screen, or across towards the moon, lies well behind this
+  //             one) catches the moon and the warm lights round it: a one-pixel bright outline
+  //   lamps     point lights with a windowed falloff (or the day model's, with opt.falloff), occlusion, a soft cap,
+  //             a glint on wet ground, and a halo in the haze that scales with the haze where the light hangs
+  //   cones     a pool and a beam marched through the haze, cut by the cone's shadow table
+  //   haze      exponential height fog, thick at the ground and thinning upward, integrated exactly along the view
+  //             ray, clear near the eye; it takes a little moonlight towards the moon
+  //   glow      palette glow is emissive and only partly dimmed by the haze, so eyes and lamps read far into it
+  //   floor     where no slice was drawn: a game's own floor function (light.floor, GLSL), else the ground map,
+  //             else a flat colour
+  // Every number below that is a distance is in metres for a scene with an art pixel of a tenth of a metre, and
+  // is scaled by KM (ten times opt.unit), so it holds at any scale. Its output is linear light (it needs, and
+  // turns on, the half-float picture) with the view distance in alpha, for the depth of field (opt.post).
+  const FS_NIGHT = `#version 300 es
+  precision highp float;
+  #define CONES_ON 0
+  #define ROWS_ON 0
+  #define GROUND_ON 0
+  #define LIGHTMAP_ON 0
+  #define RINGS_ON 0
+  #define TWO_ON 0
+  #define FLOOR_ON 0
+  uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  uniform highp sampler2D u_lt;
+  uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];
+  uniform int u_nl, u_ns; uniform float u_lampCap, u_falloff;
+  #if ROWS_ON
+  uniform sampler2D u_g2;
+  #endif
+  #if GROUND_ON
+  uniform sampler2D u_gm; uniform vec4 u_gmBox;
+  #endif
+  #if LIGHTMAP_ON
+  uniform sampler2D u_lm; uniform vec4 u_lmBox; uniform float u_lmK;
+  #endif
+  #if RINGS_ON
+  uniform vec4 u_ring[${RINGS}], u_ringCol[${RINGS}]; uniform float u_ringGlow[${RINGS}]; uniform int u_nr;
+  #endif
+  uniform mat4 u_inv;
+  uniform vec3 u_eye, u_fwd, u_moon, u_moonCol, u_skyCol, u_earthCol, u_fogCol, u_floorCol;
+  uniform vec4 u_fog;         // haze: density at the ground (per unit of distance), how fast it thins upward (per unit), moon in the haze, (unused)
+  uniform vec4 u_hmBox;       // the height map's place: x0, y0, width, depth
+  uniform vec3 u_hmK;         // world height per step of a byte, the highest it can hold less a margin, opt.unit
+  uniform vec4 u_q;           // moon shadow steps (0: none), occlusion on, beams on, glow strength
+  uniform vec4 u_look;        // the haze starts this far from the eye, rim strength, (free), the warm lights' share of the rim
+  uniform vec4 u_contact[8]; uniform int u_ncontact;     // contact shadows: x, y, radius, strength
+  uniform float u_time, u_ground;
+  in vec2 v_uv; out vec4 o;
+
+  float hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+  float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }
+  float height(ivec2 px) { vec4 g = texelFetch(u_g1, clamp(px, ivec2(0), textureSize(u_g1, 0) - 1), 0); return (g.r * 65280.0 + g.g * 255.0) / 65535.0 * ${HMAX}.0; }
+  // the height map at a point: x the top of the tallest thing, y the bottom of its highest solid run (0 with one layer)
+  vec2 hm(vec2 p) {
+    vec2 uv = (p - u_hmBox.xy) / u_hmBox.zw; if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return vec2(0.0);
+  #if TWO_ON
+    return textureLod(u_hm, uv, 0.0).rg * u_hmK.x;
+  #else
+    return vec2(textureLod(u_hm, uv, 0.0).r * u_hmK.x, 0.0);
+  #endif
+  }
+  // how far a point is clear of the solid there (negative inside it): above the top, or under a floating crown
+  float clearOf(vec3 s) { vec2 h = hm(s.xy); return max(s.z - h.x, h.y - s.z); }
+  float fogAt(float z) { return u_fog.x * exp(-max(z, 0.0) * u_fog.y); }
+  // where another internal pixel of this frame lies in the world (its stored height on its own view ray); sky: far away
+  vec3 worldAt(ivec2 q) {
+    ivec2 S = textureSize(u_g0, 0); q = clamp(q, ivec2(0), S - 1);
+    bool gq = texelFetch(u_g0, q, 0).r == 0.0; float hq = gq ? u_ground : height(q);
+    vec2 nd = (vec2(q) + 0.5) / vec2(S) * 2.0 - 1.0;
+    vec4 a = u_inv * vec4(nd, -1.0, 1.0), b = u_inv * vec4(nd, 1.0, 1.0); a /= a.w; b /= b.w;
+    float fz = b.z - a.z; vec3 rq = normalize(b.xyz - a.xyz + vec3(0.0, 0.0, 1e-6));
+    vec4 g1q = texelFetch(u_g1, q, 0);
+    if (!gq && abs(rq.z) < 0.3 && g1q.b + g1q.a > 0.0) return u_eye + rq * ((g1q.b * 65280.0 + g1q.a * 255.0) / 65535.0 * 4096.0 / max(dot(rq, u_fwd), 0.05));
+    if (gq && (fz > -0.0001 || (hq - a.z) / fz > 1.0)) return u_eye + rq * 9999.0;
+    return mix(a.xyz, b.xyz, (hq - a.z) / (abs(fz) < 0.0001 ? -0.0001 : fz));
+  }
+  #if CONES_ON
+  float spotOf(vec4 S, vec4 D, vec3 s, out float dist) {
+    vec3 v = s - S.xyz; dist = length(v); if (dist > S.w || dist < 0.01) return 0.0;
+    float c = dot(v / dist, D.xyz), ch = D.w;
+    return smoothstep(ch, ch + (1.0 - ch) * 0.35, c) * (1.0 - dist / S.w) * (0.55 + 0.45 * smoothstep(ch + (1.0 - ch) * 0.5, 1.0, c));
+  }
+  float coneBin(int k, int b, vec4 S, vec3 s, float d) {
+    vec4 t = texelFetch(u_cone, ivec2(clamp(b, 0, ${BINS - 1}), k), 0);
+    float bd = (t.r * 65280.0 + t.g * 255.0) / 65535.0 * S.w, bh = t.b * ${HMAX}.0;
+    if (d < bd + S.w * 0.004) return 1.0;
+    float lz = S.z + (bh - S.z) * d / max(bd, S.w * 0.001);
+    return clamp((s.z - lz) / max(S.w * 0.02, 0.01) + 0.5, 0.0, 1.0);
+  }
+  float coneShadow(int k, vec4 S, vec4 X, vec3 s) {
+    if (X.z < 0.5) return 1.0;
+    vec2 h = s.xy - S.xy; float d = length(h);
+    if (d < 0.01) return 1.0;
+    float a = atan(h.y, h.x + 1e-5) - X.x; a = mod(a + 3.14159265, 6.2831853) - 3.14159265;
+    float f = (a / max(X.y, 0.01) * 0.5 + 0.5) * ${BINS}.0 - 0.5;
+    if (f < -1.0 || f > ${BINS}.0) return 1.0;
+    float i = floor(f); int b = int(i);
+    return mix(coneBin(k, b, S, s, d), coneBin(k, b + 1, S, s, d), f - i);
+  }
+  #endif
+  #if FLOOR_ON
+  FLOOR_SOURCE
+  #endif
+  // one point light (see the day model's lamp for the layout)
+  void lamp(vec4 L, vec4 C, float hk, vec3 p, vec3 n, vec3 ray, float dist, float wet, float KM, inout vec3 irr, inout vec3 warm, inout vec3 spec, inout vec3 halo) {
+    vec3 d3 = L.xyz - p; float r2 = dot(d3, d3), R2 = L.w * L.w;
+    if (r2 < R2) {
+      float r = sqrt(r2), att;
+      if (u_falloff > 0.5) { float x = r2 / R2, win = (1.0 - x) * (1.0 - x); att = win * win / (1.0 + r2 / max(R2 * 0.02, 0.01 * KM * KM)); }   // windowed, steep near the source
+      else { float a = 1.0 - r / L.w; att = a * a; }
+      float lam = u_falloff > 0.5 ? 0.22 + 0.78 * max(dot(n, d3 / max(r, 0.001)), 0.0) : 0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0);
+      float occ = 1.0;
+      if (C.w > 0.5 && r > 0.4 * KM) { for (int k = 1; k < 8; k++) { vec3 s = p + d3 * (float(k) / 8.0); occ = min(occ, clamp(clearOf(s) * 2.5 / KM + 0.35, 0.0, 1.0)); } }
+      irr += C.rgb * att * lam * occ; warm += C.rgb * att * occ;
+      if (wet > 0.0) { vec3 hv = normalize(d3 / max(r, 0.001) - ray); spec += C.rgb * att * occ * pow(max(dot(n, hv), 0.0001), wet > 0.5 ? 70.0 : 18.0) * (wet > 0.5 ? 0.8 : 0.5 * wet); }
+    }
+    if (hk > 0.0) {
+      float tt = clamp(dot(L.xyz - u_eye, ray), 0.0, dist), dp = length(u_eye + ray * tt - L.xyz), hr = L.w * 0.45;
+      if (dp < hr) { float q = 1.0 - dp / max(hr, 0.001); halo += C.rgb * hk * fogAt(L.z) * q * q * hr * 0.09 / (dp + 0.3 * KM + hr * 0.02); }
+    }
+  }
+
+  void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy); float KM = u_hmK.z * 10.0;
+    vec4 g0 = texelFetch(u_g0, px, 0);
+    bool ground = g0.r == 0.0;
+    float h = ground ? u_ground : height(px);
+    vec2 ndc = v_uv * 2.0 - 1.0; vec4 a = u_inv * vec4(ndc, -1.0, 1.0), b = u_inv * vec4(ndc, 1.0, 1.0); a /= a.w; b /= b.w;
+    vec3 seg = b.xyz - a.xyz; vec3 ray = seg / max(length(seg), 1e-6);
+    float fall = seg.z;
+    if (ground && (fall > -0.0001 || (h - a.z) / fall > 1.0)) {      // the sky
+      float up = clamp(ray.z * 3.0, 0.0, 1.0), m = max(dot(ray, u_moon), 0.0);
+      vec3 sky = mix(u_fogCol * 1.15, u_skyCol * 0.5, up) + u_moonCol * (pow(max(m, 1e-4), 64.0) * 0.5 + pow(max(m, 1e-4), 6.0) * 0.08);
+      o = vec4(sky, 999.0); return;
+    }
+    vec3 p = mix(a.xyz, b.xyz, (h - a.z) / (abs(fall) < 0.0001 ? -0.0001 : fall));
+    vec4 g1 = texelFetch(u_g1, px, 0);
+    if (!ground && abs(ray.z) < 0.06 && g1.b + g1.a > 0.0) p = u_eye + ray * ((g1.b * 65280.0 + g1.a * 255.0) / 65535.0 * 4096.0 / max(dot(ray, u_fwd), 0.05));
+    float dist = length(p - u_eye);
+
+    vec3 alb, n = vec3(0.0, 0.0, 1.0); float glow = 0.0, wet = 0.0;
+    if (ground) {
+  #if FLOOR_ON
+      alb = floorAt(p.xy, n, wet, glow);
+  #else
+      alb = u_floorCol;
+    #if GROUND_ON
+      vec2 gu = (p.xy - u_gmBox.xy) / u_gmBox.zw;
+      if (gu.x >= 0.0 && gu.y >= 0.0 && gu.x < 1.0 && gu.y < 1.0) {
+        ivec2 gs = textureSize(u_gm, 0); vec4 gm = texelFetch(u_gm, clamp(ivec2(gu * vec2(gs)), ivec2(0), gs - 1), 0);
+        vec4 gc = mix(texelFetch(u_pal, ivec2(int(gm.r * 255.0 + 0.5), 0), 0), texelFetch(u_pal, ivec2(int(gm.g * 255.0 + 0.5), 0), 0), gm.b);
+        alb = gc.rgb; glow = gc.a;
+      }
+    #endif
+  #endif
+    } else {
+  #if ROWS_ON
+      vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), int(texelFetch(u_g2, px, 0).r * 255.0 + 0.5)), 0);
+  #else
+      vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), 0), 0);
+  #endif
+      alb = pal.rgb; glow = pal.a;
+      vec3 nn = g0.gba * 2.0 - 1.0; n = nn / max(length(nn), 1e-4);
+    }
+    n = n / max(length(n), 1e-4);
+
+    // the moon's shadow: walk towards it over the height map, steps from 0.12 m growing to 1 m, a wide penumbra
+    float sh = 1.0;
+    if (u_q.x > 0.0) {
+      vec3 q = p + n * (0.06 * KM) + vec3(0.0, 0.0, 0.04 * KM);
+      float d = 0.0, ds = 0.12 * KM;
+      for (int i = 0; i < 48; i++) {
+        if (float(i) >= u_q.x) break;
+        d += ds; ds = min(ds * 1.13, KM);
+        vec3 s = q + u_moon * d;
+        if (s.z > u_hmK.y) break;
+        sh = min(sh, clamp(clearOf(s) / (0.11 * d + 0.05 * KM), 0.0, 1.0));
+        if (sh <= 0.0) break;
+      }
+      sh = sh * sh * (3.0 - 2.0 * sh);
+    }
+    // occlusion: land that rises close round the pixel takes sky away; land overhead (a canopy) takes some too
+    float ao = 1.0;
+    if (u_q.y > 0.0) {
+      vec2 c0 = p.xy + n.xy * (0.3 * KM); float occ = 0.0;
+      for (int i = 0; i < 6; i++) {
+        float an = float(i) * 1.0472 + 0.3; vec2 dir = vec2(cos(an), sin(an));
+        occ += clamp((hm(c0 + dir * (0.6 * KM)).x - p.z - 0.1 * KM) / (0.6 * KM), 0.0, 1.0) * 0.55 + clamp((hm(c0 + dir * (2.0 * KM)).x - p.z - 0.2 * KM) / (2.0 * KM), 0.0, 1.0) * 0.45;
+      }
+      vec2 over = hm(p.xy); float canopy = over.y > p.z + KM ? 0.35 : 0.0;
+      ao = clamp(1.0 - occ / 6.0 - canopy, 0.25, 1.0);
+    }
+    // contact shadows under figures the height map does not hold
+    for (int i = 0; i < 8; i++) {
+      if (i >= u_ncontact) break;
+      vec4 C = u_contact[i];
+      if (C.w > 0.0 && p.z < u_ground + 0.25 * KM) { float cd = length((p.xy - C.xy) * vec2(1.0, 1.25)), ck = C.w * (1.0 - smoothstep(C.z * 0.25, max(C.z, 1e-3), cd)); sh *= 1.0 - ck; ao *= 1.0 - ck * 0.7; }
+    }
+    vec3 light = mix(u_earthCol, u_skyCol, n.z * 0.5 + 0.5) * ao;
+    light += u_moonCol * max(dot(n, u_moon), 0.0) * sh;
+    vec3 col = alb * light;
+    if (wet > 0.5) { vec3 v = -ray, hv = (u_moon + v) / max(length(u_moon + v), 1e-4); col = col * 0.5 + u_skyCol * 0.2 + u_moonCol * pow(max(dot(n, hv), 0.0001), 90.0) * sh * 0.55; }
+
+    // POINT LIGHTS: the first eight from uniforms, the rest from the table
+    vec3 irr = vec3(0.0), warm = vec3(0.0), spec = vec3(0.0), halo = vec3(0.0);
+    for (int i = 0; i < 8; i++) { if (u_lamp[i].w > 0.0) lamp(u_lamp[i], u_lampCol[i], u_lampHalo[i], p, n, ray, dist, wet, KM, irr, warm, spec, halo); }
+    for (int i = 8; i < ${LIGHTS}; i++) {
+      if (i >= u_nl) break;
+      lamp(texelFetch(u_lt, ivec2(i, 0), 0), texelFetch(u_lt, ivec2(i, 1), 0), texelFetch(u_lt, ivec2(i, 2), 0).x, p, n, ray, dist, wet, KM, irr, warm, spec, halo);
+    }
+  #if LIGHTMAP_ON
+    vec2 lu = (p.xy - u_lmBox.xy) / u_lmBox.zw;
+    if (lu.x >= 0.0 && lu.y >= 0.0 && lu.x <= 1.0 && lu.y <= 1.0) irr += textureLod(u_lm, lu, 0.0).rgb * u_lmK;
+  #endif
+  #if RINGS_ON
+    vec3 ringE = vec3(0.0);
+    for (int i = 0; i < ${RINGS}; i++) {
+      if (i >= u_nr) break;
+      vec4 G = u_ring[i], C = u_ringCol[i]; vec2 dv = p.xy - G.xy; float r = length(dv), w = max(C.w, 1e-3);
+      float d = (r - G.w) / w, band = exp(-d * d * 2.0) * exp(-max(p.z - G.z, 0.0) / (w * 2.0));
+      if (band < 0.002) continue;
+      vec3 toMid = vec3(-dv / max(r, 1e-3) * sign(d), 0.6); toMid = toMid / max(length(toMid), 1e-4);
+      irr += C.rgb * band * (0.35 + 0.65 * max(dot(n, toMid), 0.0)); ringE += C.rgb * u_ringGlow[i] * band * band;
+    }
+  #endif
+    if (u_lampCap > 0.0) irr = irr / (1.0 + max(irr.r, max(irr.g, irr.b)) * u_lampCap);
+    col += alb * irr + spec;
+
+    // CONES: the pool where the beam lands, and the beam in the haze
+    vec3 beam = vec3(0.0);
+  #if CONES_ON
+    for (int k = 0; k < ${CONES}; k++) {
+      if (k >= u_ns) break;
+      vec4 S = texelFetch(u_lt, ivec2(k, 3), 0), D = texelFetch(u_lt, ivec2(k, 4), 0), K = texelFetch(u_lt, ivec2(k, 5), 0), X = texelFetch(u_lt, ivec2(k, 6), 0);
+      float dd, s0 = spotOf(S, D, p, dd);
+      if (s0 > 0.0) col += alb * K.rgb * s0 * coneShadow(k, S, X, p) * (0.35 + 0.65 * max(dot(n, (S.xyz - p) / max(dd, 0.01)), 0.0)) * 1.6 / (1.0 + dd * dd * 0.003 / (KM * KM));
+      if (u_q.z > 0.0 && K.w > 0.0) {
+        vec3 cc = S.xyz + D.xyz * S.w * 0.5;
+        float sn = sqrt(max(1.0 - D.w * D.w, 0.0)), rs = S.w * (0.5 + sn / max(D.w, 0.2) * 0.9);
+        vec3 oc = u_eye - cc; float bq = dot(oc, ray), disc = bq * bq - (dot(oc, oc) - rs * rs);
+        if (disc > 0.0) {
+          float sq = sqrt(disc), t0 = max(-bq - sq, 0.0), t1 = min(-bq + sq, dist);
+          if (t1 > t0) {
+            float ds = (t1 - t0) / 12.0, jit = hash(vec2(px) + float(k) * 13.7); vec3 acc = vec3(0.0);
+            for (int i = 0; i < 12; i++) { float sd; vec3 s = u_eye + ray * (t0 + (float(i) + jit) * ds); float sp = spotOf(S, D, s, sd); if (sp > 0.0) acc += vec3(sp * fogAt(s.z) * coneShadow(k, S, X, s) / (1.0 + sd * 0.05 / KM)); }
+            beam += K.rgb * K.w * acc * ds * 3.6;
+          }
+        }
+      }
+    }
+  #endif
+
+    // RIM: a silhouette edge catches the moon from behind, and the warm lights round it
+    if (!ground && u_look.y > 0.0 && glow < 0.05) {
+      vec3 rw = vec3(u_fwd.y, -u_fwd.x, 0.0); int sx = dot(u_moon, rw) >= 0.0 ? 1 : -1;
+      float d0 = length(worldAt(px) - u_eye), j0 = 0.5 * KM + d0 * 0.03, j1 = 1.5 * KM + d0 * 0.08;
+      float e1 = smoothstep(j0, j1, length(worldAt(px + ivec2(0, 1)) - u_eye) - d0);
+      float e2 = smoothstep(j0, j1, length(worldAt(px + ivec2(sx, 0)) - u_eye) - d0);
+      float e3 = smoothstep(j0, j1, length(worldAt(px - ivec2(sx, 0)) - u_eye) - d0) * 0.4;
+      float rim = max(max(e1, e2), e3) * exp(-d0 / (38.0 * KM));
+      col += rim * u_look.y * (u_moonCol * (0.25 + 0.75 * sh) + warm * u_look.w) * (0.12 + alb * 1.4);
+    }
+    vec3 emit = alb * glow * u_q.w;
+    col += emit;
+    // THE HAZE: exponential height fog along the view ray, clear for the first stretch from the eye
+    float ze = u_eye.z, zp = p.z, dz = ze - zp, kf = u_fog.y;
+    float od = abs(dz) > 0.01 ? u_fog.x * dist * (exp(-max(zp, 0.0) * kf) - exp(-max(ze, 0.0) * kf)) / (dz * max(kf, 1e-3)) : u_fog.x * dist * exp(-max(zp, 0.0) * kf);
+    od *= clamp((dist - u_look.x) / max(dist, 1e-3), 0.0, 1.0);
+    float fa = 1.0 - exp(-max(od, 0.0));
+    vec3 fogC = u_fogCol + u_moonCol * u_fog.z * pow(max(dot(ray, u_moon), 1e-4), 4.0);
+    beam = beam / (1.0 + max(beam.r, max(beam.g, beam.b)) * 1.2);
+    halo = halo / (1.0 + max(halo.r, max(halo.g, halo.b)) * 0.8);
+    col = mix(col, fogC, fa) + emit * fa * 0.6 + halo + beam;
+  #if RINGS_ON
+    col += ringE;
+  #endif
+    o = vec4(max(col, vec3(0.0)), dist);
+  }`;
+
   const FS_HEAT = `#version 300 es
   precision highp float;
   uniform sampler2D u_count; uniform int u_channel; uniform float u_unit;
@@ -640,6 +941,61 @@
     vec3 s = pick(texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_px)) + pick(texture(u_tex, v_uv + vec2(1.0, -1.0) * u_px)) + pick(texture(u_tex, v_uv + vec2(-1.0, 1.0) * u_px)) + pick(texture(u_tex, v_uv + vec2(1.0, 1.0) * u_px));
     o = vec4(min(s * 0.25, vec3(24.0)), 1.0);
   }`;
+  // THE FILM POST (opt.post, or the night model): bloom keyed on brightness alone (the light pass's alpha is the
+  // view distance here), a tilt-shift depth of field, an ACES-fitted tone curve and a grade, a vignette and grain.
+  const FS_KNEE = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_tex; uniform vec2 u_px; uniform float u_knee; in vec2 v_uv; out vec4 o;
+  ${SCRUB}
+  vec3 pick(vec3 c) { c = scrub(c); float l = max(c.r, max(c.g, c.b)); return c * smoothstep(u_knee, u_knee + 0.8, l); }
+  void main() {
+    vec3 a = pick(texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_px).rgb), b = pick(texture(u_tex, v_uv + vec2(1.0, -1.0) * u_px).rgb);
+    vec3 c = pick(texture(u_tex, v_uv + vec2(-1.0, 1.0) * u_px).rgb), d = pick(texture(u_tex, v_uv + vec2(1.0, 1.0) * u_px).rgb);
+    o = vec4(min((a + b + c + d) * 0.25, vec3(24.0)), 1.0);
+  }`;
+  const FS_DOWN = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_tex; uniform vec2 u_px; in vec2 v_uv; out vec4 o;
+  ${SCRUB}
+  void main() {
+    vec3 a = scrub(texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_px).rgb), b = scrub(texture(u_tex, v_uv + vec2(1.0, -1.0) * u_px).rgb);
+    vec3 c = scrub(texture(u_tex, v_uv + vec2(-1.0, 1.0) * u_px).rgb), d = scrub(texture(u_tex, v_uv + vec2(1.0, 1.0) * u_px).rgb);
+    o = vec4(min((a + b + c + d) * 0.25, vec3(8.0)), 1.0);
+  }`;
+  //   tilt-shift  crisp at the focus distance, soft nearer and further, and softer towards the top and bottom of
+  //               the frame (the miniature look); the soft copy is read at the internal pixel's centre, so even the
+  //               soft parts keep square pixels
+  //   tone        a filmic curve (ACES fitted), exposure first; then the grade: black point, an S-curve for
+  //               contrast, saturation, blue in the shadows; a vignette; grain per canvas pixel
+  const FS_FILM = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_tex, u_bloom, u_dof; uniform vec2 u_size;
+  uniform vec4 u_k;            // bloom strength, vignette, grain, exposure
+  uniform vec4 u_focus;        // focus distance, its depth, the screen row of the tilt-shift band (0..1, below 0: none), strength
+  uniform vec4 u_grade;        // contrast, black level, saturation, shadow blue
+  uniform float u_time;
+  in vec2 v_uv; out vec4 o;
+  ${SCRUB}
+  float hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+  void main() {
+    ivec2 ip = ivec2(min(v_uv * u_size, u_size - 1.0));
+    vec4 s = texelFetch(u_tex, ip, 0); vec3 c = scrub(s.rgb);
+    vec2 cuv = (vec2(ip) + 0.5) / u_size;
+    float dz = abs(s.a - u_focus.x) / max(u_focus.y, 0.1), ty = u_focus.z < 0.0 ? 0.0 : abs(cuv.y - u_focus.z);
+    float coc = clamp(max(smoothstep(0.6, 2.2, dz), smoothstep(0.3, 0.68, ty) * 0.75) * u_focus.w, 0.0, 1.0);
+    c = mix(c, scrub(texture(u_dof, cuv).rgb), coc);
+    c += scrub(texture(u_bloom, v_uv).rgb) * u_k.x;
+    c *= u_k.w;
+    c = clamp((c * (2.51 * c + 0.03)) / max(c * (2.43 * c + 0.59) + 0.14, vec3(1e-4)), 0.0, 1.0);
+    c = max(c - u_grade.y, vec3(0.0)) / max(1.0 - u_grade.y, 0.01);
+    c = mix(c, c * c * (3.0 - 2.0 * c), u_grade.x);
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    c = mix(vec3(l), c, u_grade.z);
+    c += vec3(0.025, 0.01, -0.02) * smoothstep(0.35, 1.0, l) + vec3(-0.01, 0.0, 0.028) * u_grade.w * (1.0 - smoothstep(0.0, 0.25, l)) * smoothstep(0.0, 0.05, l);
+    vec2 d = v_uv - 0.5; c *= 1.0 - u_k.y * dot(d, d) * 1.8;
+    c += (hash(gl_FragCoord.xy + fract(u_time * 7.13) * 91.7) - 0.5) * u_k.z;
+    o = vec4(clamp(c, 0.0, 1.0), 1.0);
+  }`;
   const FS_BLUR = `#version 300 es
   precision highp float;
   uniform sampler2D u_tex; uniform vec2 u_step; in vec2 v_uv; out vec4 o;
@@ -675,7 +1031,9 @@
     o = vec4(c, 1.0);
   }`;
 
-  function create(canvas) {
+  // opts (optional): { warm: features for E.warm (default { cones: true }: the plain and the cone light pass are
+  // made at once, so the first frame with cones does not hitch), or false }
+  function create(canvas, opts) {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true });
     if (!gl) throw new Error('WebGL2 is not available');
     const floatOK = !!gl.getExtension('EXT_color_buffer_float');
@@ -712,9 +1070,16 @@
       return variants[key];
     }
     // the light pass for a set of features
-    function lightProgram(cones, rows, ground, lightMap, hdr, rings) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : []);
+    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : []);
       return on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight;
+    }
+    // the night model for a set of features, and a game's floor (GLSL source, or none)
+    const floors = [];
+    function nightProgram(cones, rows, ground, lightMap, rings, two, floor) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : []);
+      let fi = floor ? floors.indexOf(floor) : -1; if (floor && fi < 0) { floors.push(floor); fi = floors.length - 1; }
+      return variant('n' + on.join() + '|' + fi, VS_FULL, floor ? FS_NIGHT.replace('FLOOR_SOURCE', floor) : FS_NIGHT, on);
     }
     const pBright = program(VS_FULL, FS_BRIGHT), pBlur = program(VS_FULL, FS_BLUR), pPost = program(VS_FULL, FS_POST);
 
@@ -746,6 +1111,8 @@
       const t = { lit: texture(iw, ih, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR), fbo: gl.createFramebuffer(), bloom: [], fboBloom: [] };
       gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.lit, 0); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
       for (let i = 0; i < 2; i++) { t.bloom[i] = texture(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR); t.fboBloom[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, t.fboBloom[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.bloom[i], 0); }
+      t.dof = []; t.fboDof = [];
+      for (let i = 0; i < 2; i++) { t.dof[i] = texture(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR); t.fboDof[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, t.fboDof[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.dof[i], 0); }
       return (hdr = t);
     }
     function targets(w, h) {
@@ -768,7 +1135,7 @@
     }
 
     const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, RINGS: RINGS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
-    let palTex = null, hmTex = null, hmBox = [0, 0, 1, 1], hmStep = 0.5, query = null, timing = false;
+    let palTex = null, hmTex = null, hmBox = [0, 0, 1, 1], hmStep = 0.5, hmTwo = false, query = null, timing = false;
     let gmTex = null, gmBox = null, lmTex = null, lmBox = null, lmK = 1;
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
 
@@ -779,14 +1146,16 @@
     // groundMap, lightMap, hdr } (true for each the game will use). Cones and rings come and go from frame to
     // frame, so every combination of them is made; the rest are taken to stay on once they are set. Each program
     // is drawn once into a 1 x 1 target, so the driver does its own part now too. Returns how many were made.
-    let warmFbo = null;
+    let warmFbo = null;      // (features also: night, floor (its GLSL), twoLayer, post: see the night model and the film post)
     E.warm = function (f) {
       f = f || {};
       if (!warmFbo) { warmFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), 0); gl.bindTexture(gl.TEXTURE_2D, null); }      // (unbound, or the programs would sample their own target)
-      const progs = [], hdr = !!f.hdr && floatOK;
-      [false, !!f.cones].forEach(function (c, i) { if (i && !c) return; [false, !!f.rings].forEach(function (r, j) { if (j && !r) return; progs.push(lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r)); }); });
+      const night = !!f.night && floatOK, film = (night || !!f.post) && floatOK, hdr = (!!f.hdr || film) && floatOK, progs = [];
+      [false, !!f.cones].forEach(function (c, i) { if (i && !c) return; [false, !!f.rings].forEach(function (r, j) { if (j && !r) return;
+        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film)); }); });
+      if (film) progs.push(variant('knee', VS_FULL, FS_KNEE, []), variant('down', VS_FULL, FS_DOWN, []), variant('film', VS_FULL, FS_FILM, []));
       if (f.rows) progs.push(variant('gr', VS_SLICE, FS_G, ['ROWS_ON']), variant('gvr', VS_VOXEL, FS_GVOXEL, ['ROWS_ON']), variant('gir', VS_IMP, FS_GIMP, ['ROWS_ON']));
-      if (hdr) progs.push(variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']), variant('ph', VS_FULL, FS_POST, ['HDR_ON']));
+      if (hdr && !film) progs.push(variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']), variant('ph', VS_FULL, FS_POST, ['HDR_ON']));
       gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.viewport(0, 0, 1, 1); gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.bindVertexArray(vaoFull);
       progs.forEach(function (p) { gl.useProgram(p.p); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -801,9 +1170,12 @@
     // step (optional): the world height of one step of a byte (0.5 if not given). The edge of the height map is the
     // edge of the map. A map of the same size as the last goes up in place, so sending a whole map every frame (a
     // horde splatted into it, to throw shadows) costs one upload.
-    E.setHeightMap = function (bytes, w, h, box, step) {
-      if (hmTex && E.hmW === w && E.hmH === h) { gl.bindTexture(gl.TEXTURE_2D, hmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, bytes); }
-      else { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); E.hmW = w; E.hmH = h; }
+    // layers (optional, 1 or 2): with 2 the map has two bytes a cell, the top of the tallest thing and the bottom
+    // of its highest solid run, so a tree's crown floats on its trunk and the sun or the moon gets in under it.
+    E.setHeightMap = function (bytes, w, h, box, step, layers) {
+      const two = layers === 2, F = two ? gl.RG : gl.RED;
+      if (hmTex && E.hmW === w && E.hmH === h && hmTwo === two) { gl.bindTexture(gl.TEXTURE_2D, hmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, F, gl.UNSIGNED_BYTE, bytes); }
+      else { hmTex = texture(w, h, two ? gl.RG8 : gl.R8, F, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); E.hmW = w; E.hmH = h; hmTwo = two; }
       hmBox = box ? box.slice(0, 4) : [0, 0, w, h]; hmStep = step || 0.5;
     };
     // THE GROUND MAP (optional): open ground (where no slice was drawn) inside `box` takes its colour from this, a
@@ -824,14 +1196,14 @@
     const binD = new Float32Array(BINS), binH = new Float32Array(BINS);
     // A cone: [x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]. The axis need not be unit length; beam is how
     // strongly it shows in the air (0: only the pool). Returns how many cones went into the table.
-    function putCones(C, blockers) {
+    function putCones(C, blockers, table) {
       const ns = Math.min(CONES, C.length), L4 = LIGHTS * 4;
       for (let k = 0; k < ns; k++) {
         const c = C[k], l = Math.hypot(c[4], c[5], c[6]) || 1, dx = c[4] / l, dy = c[5] / l, dz = c[6] / l, half = c[7], j = k * 4;
         // how wide the cone is seen from above, round its light: its shadow table must span that (all round, for a cone that points down)
         const yaw = Math.atan2(dy, dx), tilt = Math.asin(Math.max(-1, Math.min(1, -dz))), hw = tilt + half > 1.25 ? Math.PI : Math.min(Math.PI, half / Math.max(0.25, Math.cos(tilt + half * 0.5)) + 0.15);
         ltData.set([c[0], c[1], c[2], Math.max(0.1, c[3])], 3 * L4 + j); ltData.set([dx, dy, dz, Math.cos(half)], 4 * L4 + j);
-        ltData.set([c[8], c[9], c[10], c[11] || 0], 5 * L4 + j); ltData.set([yaw, hw, blockers ? 1 : 0, 0], 6 * L4 + j);
+        ltData.set([c[8], c[9], c[10], c[11] || 0], 5 * L4 + j); ltData.set([yaw, hw, blockers || table ? 1 : 0, 0], 6 * L4 + j);
         if (!blockers) continue;
         // the shadow table: per angle round the light, how far to the nearest blocker [x, y, radius, height] and how tall it is
         binD.fill(c[3]); binH.fill(0);
@@ -843,6 +1215,7 @@
         }
         for (let i = 0; i < BINS; i++) { const v = Math.round(Math.max(0, Math.min(1, binD[i] / c[3])) * 65535), o = (k * BINS + i) * 4; coneBytes[o] = v >> 8; coneBytes[o + 1] = v & 255; coneBytes[o + 2] = Math.round(Math.max(0, Math.min(1, binH[i] / HMAX)) * 255); coneBytes[o + 3] = 255; }
       }
+      if (table && ns && !blockers) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, coneTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, BINS, ns, gl.RGBA, gl.UNSIGNED_BYTE, table); }
       if (blockers && ns) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, coneTex);      // (its own unit: binding it to whatever unit was active would knock out the light map or the ground map)
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, BINS, ns, gl.RGBA, gl.UNSIGNED_BYTE, coneBytes); }
       return ns;
@@ -851,14 +1224,15 @@
     // Returns how many went into the table.
     // The first eight go in uniforms (lampU, lampC, lampH), the rest in the table.
     const lampU = new Float32Array(32), lampC = new Float32Array(32), lampH = new Float32Array(8);
-    function putLights(L) {
+    function putLights(L, haloDefault) {
       const nl = Math.min(LIGHTS, L.length), L4 = LIGHTS * 4;
       lampU.fill(0); lampC.fill(0); lampH.fill(0);
       for (let i = 0; i < nl; i++) {
         const l = L[i], j = i * 4, U = i < 8 ? lampU : ltData, A = i < 8 ? 0 : L4, a = i < 8 ? lampC : ltData;
         U[j] = l[0]; U[j + 1] = l[1]; U[j + 2] = l[2]; U[j + 3] = Math.max(0.1, l[3]);
         a[A + j] = l[4]; a[A + j + 1] = l[5]; a[A + j + 2] = l[6]; a[A + j + 3] = l[7] || 0;
-        if (i < 8) lampH[i] = l[8] || 0; else ltData[2 * L4 + j] = l[8] || 0;
+        const hk = l[8] !== undefined ? l[8] : haloDefault;
+        if (i < 8) lampH[i] = hk; else ltData[2 * L4 + j] = hk;
       }
       return nl;
     }
@@ -877,7 +1251,7 @@
     const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
     const lift = new Float32Array(RINGS * 7), NOHORDE = [], unit = { stack: null, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1, shx: 0, shy: 0, zs: 1, fade: 0, row: 0, lift: false, each: null, reach: 0 };
     function build(list, M, opt) {
-      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel, U = opt.unit || 1, zq = ZQ / U;      // zq: height buckets per world unit
+      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel, U = opt.unit || 1, zq = ZQ;      // zq: height buckets per world unit (2048 of them: 128 units)
       let n = 0, slices = 0, tallest = 0;
       // A shell stack is hollow, so a shallow view ray must not slip between two copies of a slice and through the
       // shell: the copies have to be closer together than the shell is deep along that ray.
@@ -1043,6 +1417,11 @@
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
     //        lamps [[x, y, z, reach, r, g, b, occlude, halo]] (up to 256), lampCap (roll off the lights' sum: 0 off),
     //        cones [[x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]] (up to 16), coneBlockers [[x, y, radius, height]],
+    //        coneTable (instead of coneBlockers: the shadow tables themselves, ${BINS} x 16 RGBA bytes: per bin the
+    //        distance to the first blocker over the cone's range in 16 bits, its height over ${HMAX} in 8),
+    //        falloff ('window' for the steep windowed lamp falloff), contacts [[x, y, radius, strength]] (night),
+    //        post ({ dof: [focus, depth, row, strength], grade: [contrast, black, saturation, shadow blue], grain,
+    //        vignette, exposure, bloom, knee }: the film post, on the half-float picture),
     //        lightMapScale (the light map's strength this frame: 1 if not given, 0 by day),
     //        rings [[x, y, z, radius, width, r, g, b, glow, lift]] (up to 8: a band of light round a centre, an expanding pulse),
     //        blobs [[x, y, top, radius, bottom]], fx (function (gl, M, size): draws into the lit picture, see the README) }
@@ -1086,8 +1465,10 @@
       // (with cones, the build of the shader that has them, made the first time it is needed)
       const ns = Math.min(CONES, (opt.cones || []).length);
       const nr = Math.min(RINGS, (opt.rings || []).length);
-      const HD = opt.hdr && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
-      const pl = lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr), u = pl.u, sun = env.sun;
+      // the night model and the film post both need the half-float picture
+      const night = env.model === 'night', film = !!(opt.post || night) && floatOK;
+      const HD = (opt.hdr || night || opt.post) && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
+      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film), u = pl.u, sun = env.sun;
       gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
       if (rowsOn) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
@@ -1099,6 +1480,23 @@
       }
       if (gmTex) { gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, gmTex); gl.uniform1i(u.u_gm, 8); gl.uniform4fv(u.u_gmBox, gmBox); }
       if (lmTex) { gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.uniform1i(u.u_lm, 9); gl.uniform4fv(u.u_lmBox, lmBox); gl.uniform1f(u.u_lmK, lmK * (opt.lightMapScale !== undefined ? opt.lightMapScale : 1)); }
+      gl.uniform1f(u.u_falloff, (opt.falloff || (night ? 'window' : 'linear')) === 'window' ? 1 : 0);
+      if (night) {
+        // THE NIGHT MODEL's own uniforms (see FS_NIGHT); light: { model: 'night', moon, moonCol, skyCol, earthCol,
+        // fogCol, fog: [density, thinning, moon in the haze], fogNear, rim, rimWarm, emissive, floorCol, floor (GLSL),
+        // floorUniforms (function (gl, uniforms): sets the floor's own) }
+        const fg = env.fog || [0, 0, 0];
+        gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
+        gl.uniform3fv(u.u_moon, env.moon); gl.uniform3fv(u.u_moonCol, env.moonCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_earthCol, env.earthCol || [0, 0, 0]);
+        gl.uniform3fv(u.u_fogCol, env.fogCol || [0, 0, 0]); gl.uniform3fv(u.u_floorCol, env.floorCol || [0.1, 0.09, 0.08]);
+        gl.uniform4f(u.u_fog, fg[0], fg[1], fg[2] || 0, 0); gl.uniform1f(u.u_time, opt.time || 0); gl.uniform1f(u.u_ground, opt.ground || 0);
+        gl.uniform4fv(u.u_hmBox, hmBox); gl.uniform3f(u.u_hmK, 255 * hmStep, 255 * hmStep - 0.875 * U * 10, U);
+        gl.uniform4f(u.u_q, opt.shadows ? (opt.cheap ? 22 : 48) : 0, opt.ao ? 1 : 0, opt.beams === false ? 0 : 1, env.emissive !== undefined ? env.emissive : 3);
+        gl.uniform4f(u.u_look, env.fogNear || 0, env.rim || 0, 0, env.rimWarm || 0);
+        const CT = opt.contacts || [], nc = Math.min(8, CT.length), cv = new Float32Array(32); for (let i = 0; i < nc; i++) cv.set(CT[i].slice(0, 4), i * 4);
+        gl.uniform4fv(u.u_contact, cv); gl.uniform1i(u.u_ncontact, nc);
+        if (env.floor && env.floorUniforms) env.floorUniforms(gl, u);
+      } else {
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
       gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
       gl.uniform4f(u.u_world, 0, 0, opt.ground || 0, opt.time || 0); gl.uniform4fv(u.u_hmBox, hmBox); gl.uniform3f(u.u_hmK, 255 * hmStep, 255 * hmStep - 2.5 * U, U);
@@ -1112,9 +1510,10 @@
       gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0);
       // the full walk: ${STEPS} steps to ${REACH} units, 16 occlusion samples. cheap: 14 longer steps to 90 units, 4 samples
       if (opt.cheap) { gl.uniform4f(u.u_walk, 14, 1.22, 9 * U, 90 * U); gl.uniform1f(u.u_dirs, 4); } else { gl.uniform4f(u.u_walk, STEPS, 1.09, 4.6 * U, REACH * U); gl.uniform1f(u.u_dirs, 8); } gl.uniform1f(u.u_water, opt.water || -9);
+      }
       const blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS), B = opt.blobs || [];
       B.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
-      const nl = putLights(opt.lamps || []); putCones(opt.cones || [], opt.coneBlockers || null);
+      const nl = putLights(opt.lamps || [], night ? 1 : 0); putCones(opt.cones || [], opt.coneBlockers || null, opt.coneTable || null);
       // only the rows in use go up: the shader reads no further than u_nl and u_ns
       gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, ltTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
       if (nl > 8) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, LIGHTS, 3, gl.RGBA, gl.FLOAT, ltData.subarray(0, LIGHTS * 12));
@@ -1122,7 +1521,7 @@
       gl.uniform1i(u.u_lt, 5); gl.uniform1i(u.u_nl, nl); gl.uniform1f(u.u_lampCap, opt.lampCap || 0);
       gl.uniform4fv(u.u_lamp, lampU); gl.uniform4fv(u.u_lampCol, lampC); gl.uniform1fv(u.u_lampHalo, lampH);
       if (ns) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, coneTex); gl.uniform1i(u.u_cone, 6); gl.uniform1i(u.u_ns, ns); }
-      gl.uniform4fv(u.u_blob, blobs); gl.uniform1fv(u.u_blobLow, low); gl.uniform1i(u.u_nblob, Math.min(BLOBS, B.length));
+      if (!night) { gl.uniform4fv(u.u_blob, blobs); gl.uniform1fv(u.u_blobLow, low); gl.uniform1i(u.u_nblob, Math.min(BLOBS, B.length)); }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.activeTexture(gl.TEXTURE0);
 
@@ -1135,16 +1534,33 @@
       }
 
       // bloom: what glows, shrunk to a quarter, blurred across and down, then again wider
+      const PO = opt.post || {}, knee = PO.knee || env.knee || 1;
       if (opt.bloom && !opt.heat) {
-        const pb = HD ? variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']) : pBright;
-        pass(blF[0], bw, bh, pb, litT); gl.uniform2f(pb.u.u_px, 1 / iw, 1 / ih); gl.uniform1f(pb.u.u_knee, env.knee || 1); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        const pb = film ? variant('knee', VS_FULL, FS_KNEE, []) : HD ? variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']) : pBright;
+        pass(blF[0], bw, bh, pb, litT); gl.uniform2f(pb.u.u_px, 1 / iw, 1 / ih); gl.uniform1f(pb.u.u_knee, knee); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         [[1.2, 0], [0, 1.2], [2.6, 0], [0, 2.6]].forEach(function (s, i) { pass(blF[1 - (i & 1)], bw, bh, pBlur, bl[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
       }
 
+      // the depth of field's soft copy: the whole picture at a quarter, blurred
+      const dof = film && PO.dof && PO.dof[3] > 0 && !opt.heat;
+      if (dof) {
+        const pd = variant('down', VS_FULL, FS_DOWN, []);
+        pass(HD.fboDof[0], bw, bh, pd, litT); gl.uniform2f(pd.u.u_px, 1 / iw, 1 / ih); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        [[1, 0], [0, 1]].forEach(function (s, i) { pass(HD.fboDof[1 - (i & 1)], bw, bh, pBlur, HD.dof[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+      }
       // to the canvas: the lit picture with its bloom, or the overdraw heat map, scaled up without smoothing
       gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
       gl.viewport((W - iw * scale) >> 1, (H - ih * scale) >> 1, iw * scale, ih * scale); gl.activeTexture(gl.TEXTURE0);
       if (opt.heat) { gl.useProgram(pHeat.p); gl.bindTexture(gl.TEXTURE_2D, countTex); gl.uniform1i(pHeat.u.u_count, 0); gl.uniform1i(pHeat.u.u_channel, opt.heat - 1); gl.uniform1f(pHeat.u.u_unit, UNIT); }
+      else if (film) {
+        const pp = variant('film', VS_FULL, FS_FILM, []), gr = PO.grade || [0, 0, 1.12, 1], fo = PO.dof || [30, 12, -1, 0];
+        gl.useProgram(pp.p); gl.bindTexture(gl.TEXTURE_2D, litT); gl.uniform1i(pp.u.u_tex, 0);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bl[0]); gl.uniform1i(pp.u.u_bloom, 1);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, HD.dof[0]); gl.uniform1i(pp.u.u_dof, 2);
+        gl.uniform2f(pp.u.u_size, iw, ih);
+        gl.uniform4f(pp.u.u_k, opt.bloom ? (PO.bloom !== undefined ? PO.bloom : 0.6) : 0, PO.vignette !== undefined ? PO.vignette : 0.35, PO.grain || 0, PO.exposure || env.exposure || 1);
+        gl.uniform4f(pp.u.u_focus, fo[0], fo[1], fo[2], dof ? fo[3] : 0); gl.uniform4fv(pp.u.u_grade, gr); gl.uniform1f(pp.u.u_time, opt.time || 0);
+      }
       else {
         const pp = HD ? variant('ph', VS_FULL, FS_POST, ['HDR_ON']) : pPost;
         gl.useProgram(pp.p); gl.bindTexture(gl.TEXTURE_2D, litT); gl.uniform1i(pp.u.u_tex, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bl[0]); gl.uniform1i(pp.u.u_bloom, 1);
@@ -1169,6 +1585,7 @@
     };
     // wait until the GPU has really finished the frame (reading a pixel back forces it)
     E.finish = function () { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); };
+    if (!opts || opts.warm !== false) E.warm(opts && opts.warm ? opts.warm : { cones: true });
     return E;
   }
 

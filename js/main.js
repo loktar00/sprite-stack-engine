@@ -33,9 +33,14 @@
   // ?unit=0.1: the same scene in other world units (every position, size and the camera times 0.1, opt.unit 0.1):
   // a test that the light pass is free of art-pixel numbers. It should look the same.
   const UNIT = Q.has('unit') ? parseFloat(Q.get('unit')) || 1 : 1;
+  // ?night=1: the village by a low moon, through the night light model, with the film post (tone curve, grade,
+  // tilt-shift depth of field, grain)
+  const NIGHT = Q.has('night'), mEl = 0.42, mAz = Math.atan2(-0.6, 0.8);
+  const NIGHT_LIGHT = { model: 'night', moon: [Math.cos(mEl) * Math.cos(mAz), Math.cos(mEl) * Math.sin(mAz), Math.sin(mEl)], moonCol: [0.92, 1.12, 1.55], skyCol: [0.075, 0.115, 0.19],
+    earthCol: [0.035, 0.032, 0.03], fogCol: [0.032, 0.052, 0.088], fog: [0.0025, 0.03, 0.08], emissive: 3.5, fogNear: 120, rim: 0.9, rimWarm: 0.05, floorCol: [0.07, 0.065, 0.05] };
   // the optional builds of the shaders this page will use, made now rather than on the first frame that needs each
   // (?nowarm=1 leaves them to be made when first needed, to measure the hitch that saves)
-  if (!Q.has('nowarm')) E.warm({ cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
+  if (!Q.has('nowarm')) E.warm({ night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
   // ?groundmap=1: the country round the map from a ground map (a 4-unit cell, two palette indices and a wear): the
   // road carried on past both edges as worn ruts, fields of pasture and plough, and a few old shell scorches,
   // in the village's own colours. The map itself is drawn by its tiles; the ground map shows past its edge.
@@ -186,9 +191,10 @@
   const preset = PRESETS[Q.get('q')] || { res: 360, bloom: 1, cheap: 0, lod: 0, voxel: -1 };
   const height = function (v) { return v === 'native' || v === '0' ? 0 : parseInt(v, 10) || 360; };
   // tod: the time of day, 0 afternoon to 1 dusk; -1 lets it drift by itself (the live page does; a held page stays put)
+  const NIGHTQ = Q.has('night');
   const S = { q: PRESETS[Q.get('q')] ? Q.get('q') : '', cheap: num('cheap', preset.cheap) === 1, split: num('split', 0) === 1,
     hsr: num('hsr', 1) === 1, heat: num('heat', 0), res: Q.has('res') ? height(Q.get('res')) : preset.res, shell: num('shell', 1) === 1, fill: num('fill', 1) === 1, guard: num('guard', 1) === 1,
-    voxel: num('voxel', preset.voxel), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', preset.lod) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', preset.bloom) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
+    voxel: num('voxel', preset.voxel), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', preset.lod) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', preset.bloom) === 1, tod: num('tod', NIGHTQ ? 1 : HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
   let list = [], sprites = [], sheet = null, blobs = [], lamps = [], frame = 0, env = Scene.light(0), scale = 1;
 
   // ---------------------------------------------------------------- lights and hordes (off unless asked for)
@@ -430,6 +436,10 @@
     const RO = { cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
       cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings, lightMapScale: env.glow };      // ?hdr=1: the half-float picture (see the README)
+    if (NIGHT) {      // ?night=1: the night model and the film post (see the README); the lanterns are lit, the soldiers get contact shadows
+      RO.light = NIGHT_LIGHT; RO.lampCap = 0.55; RO.post = { bloom: 0.4, vignette: 0.42, grain: 0.012, exposure: 1.8, grade: [0.26, 0.012, 1.16, 1], knee: 1.6, dof: [cam.mode === 'persp' ? cam.dist : 600, cam.mode === 'persp' ? cam.dist * 0.6 : 400, 0.5, 0.35] };
+      RO.contacts = walkers.slice(0, 8).map(function (k) { const P = Rig.pose(k.rig); return [P.x * SCALE, P.y * SCALE, 4.5, 0.5]; });
+    }
     E.render(UNIT !== 1 ? inUnits(RO, UNIT) : RO);
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);
