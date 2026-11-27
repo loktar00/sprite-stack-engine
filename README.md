@@ -536,7 +536,7 @@ ground cell. Everything below comes from those.
 | Shadows of moving things | Soldiers, the jeep, smoke and birds are not in the height map. Each is a cylinder or a blob, and the ray to the sun is tested against its axis. |
 | Cloud shadows | Two layers of slow noise that slide over the land and dim the sun. |
 | Rim light | Where the next pixel towards the sun on screen is much lower, this pixel is a sunward edge and catches extra light. |
-| Lamps | Up to eight point lights that fall off to nothing at their reach: lanterns at dusk, and the fire. |
+| Lamps | Point lights that fall off to nothing at their reach: lanterns at dusk, and the fire. Up to 256, with cone lights beside them: see Lights and hordes. |
 | Pixels that shine | A glow value per material in the palette. Fire always shines; lamps and windows are dull by day and light as dusk falls. |
 | Bloom | What shines is copied at a quarter of the size, blurred across and down twice, and added back over the sharp picture. |
 | Water | Ripples in the normal that drift, a share of the sky's colour, and a glint of the sun. |
@@ -547,6 +547,112 @@ ground cell. Everything below comes from those.
 | Day to dusk | One number, the time of day, moves the sun down and round, reddens and dims it, turns the sky's fill from blue to violet, thickens the haze and lights the lamps (`Scene.light` in `js/scene.js`). |
 
 **S**, **A** and **B** switch shadows, occlusion and bloom off, to see what each one adds.
+
+## Lights and hordes
+
+![A column of 240 vehicles at dusk: 96 point lights and 16 searchlights](media/hordes.png)
+
+For games with many lights and many moving things: a swarm, a convoy, a night defence. All of it is off unless
+asked for, and the village looks and runs as before. In the demo, **?horde=2000&lights=256&cones=16&tod=1**
+puts it all on (vehicles in columns crossing the map, each light and searchlight riding on one of them).
+
+**Point lights.** `opt.lamps` takes up to 256: `[x, y, z, reach, r, g, b, occlude, halo]`. The first seven
+are as before; the last two are optional.
+
+- `occlude` (1 or 0): the light is shadowed by the height map (seven steps from the pixel to the light). It
+  costs, so keep it for the few lights that matter: the ones nearest the player.
+- `halo`: how strongly the light glows in the air round itself, where the view ray passes closest to it.
+
+`opt.lampCap` (0, the default, turns it off) rolls off the sum of all lights on a pixel, so fifty muzzle
+flashes in one spot light the ground without bleaching it to white. 0.3 to 0.6 suits a crowd of lights.
+
+The lights go to the shader in a small float texture, a column per light, so their number costs no uniforms;
+the shader stops at the count given. Each light costs every pixel a few instructions (a distance test), and
+the ones in reach a little more, so 256 lights at full resolution is affordable on a desktop GPU and worth
+thinning out on a weak one (see the numbers below).
+
+**Cone lights.** `opt.cones` takes up to 16: `[x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]`. The
+axis need not be unit length; the half angle is in radians. Each lights a pool where it lands, with a soft
+edge and a brighter core, and if `beam` is above 0 it shows as a shaft in the air, marched in 12 steps along
+the part of each view ray inside the cone.
+
+`opt.coneBlockers`: `[[x, y, radius, height]]`, the posts, trunks and walls that should cut the cones. The
+engine builds a shadow table per cone from them each frame (64 angles round the light, the nearest blocker
+and its height), and the pool and the beam both read it, so a tree cuts a dark wedge out of a searchlight.
+Without blockers the cones are not shadowed.
+
+**Fade.** Any item can carry `fade` (0 to 1): that share of its pixels is left out, in a fixed 4 by 4 dither.
+What is behind shows through without sorting or blending: a tree between the camera and the player, a wreck
+sinking out of sight, a horde fading in at the edge of the map. It works in flat-slice and voxel mode.
+
+**Taller layers.** `zs` on an item draws each layer `zs` times as tall (trees of one model at different
+heights). A model can also be sampled finer than the scene's art pixel: `res` (and `zres` for the height) in
+its definition draws it that much smaller, so a detailed close-up model fits in. Slice effects (`each`) see
+the layer heights already scaled; an item with an effect may set `reach`, how far the effect moves slices,
+for culling.
+
+**Hordes.** `Engine.itemPool()` hands out the same item objects every frame, so thousands of moving stacks
+make no garbage for the collector:
+
+```js
+const pool = Engine.itemPool();
+function frame() {
+  list.length = 0;
+  pool.begin(list);
+  for (let i = 0; i < count; i++) {
+    const it = pool.add(walkFrames[(phase[i] * 6 | 0) % 6], x[i], y[i], 0, heading[i], 1);
+    it.fade = fadeIn[i];                     // every optional field is reset by add
+  }
+  E.render({ ..., list: list });
+}
+```
+
+Animation is a choice of stack: build one stack per frame of a walk or a flap, and pick the frame from each
+thing's phase. A moving horde then costs no more than a standing one. What it does cost is the slices: every
+layer of every stack on screen is one quad (or one box in voxel mode), so the numbers below grow with the
+models' height in layers. Keep horde models short, and draw the far ones with a smaller model or as
+impostors.
+
+**The fx hook.** `opt.fx(gl, M, size)` is called after the light pass with the lit picture bound and the
+slice pass's depth buffer attached (it holds depths where the slices were drawn with the depth test: hidden-
+surface removal or voxel mode). Draw sparks, tracers or smoke there with your own program (`E.program(vs,
+fs)` compiles one) and `M.vp`; they are hidden behind what stands in front of them. The picture is tone-mapped
+colour, and its alpha is how much each pixel blooms, so a particle that writes alpha glows. The engine puts its
+own state back afterwards.
+
+**Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
+instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
+back under them. Off by default.
+
+What it costs, on the street view and the overview at dusk, 1920 by 1080, on an RTX 5090
+(`python tools/bench.py --hordes`). Milliseconds are whole frames, the demo's own moving of the vehicles
+included; the CPU column is the engine's part of one frame (culling, building and sorting the instances).
+
+| view | vehicles | point lights | cones | quads or boxes | engine CPU ms | ms/frame |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| street (voxel mode) | 0 | 0 | 0 | 5394 | 0.30 | 0.83 |
+| street (voxel mode) | 500 | 0 | 0 | 9766 | 0.40 | 1.34 |
+| street (voxel mode) | 2000 | 0 | 0 | 23542 | 0.70 | 2.89 |
+| street (voxel mode) | 5000 | 0 | 0 | 50886 | 1.60 | 5.83 |
+| street (voxel mode) | 2000 | 64 | 0 | 23542 | 0.80 | 3.10 |
+| street (voxel mode) | 2000 | 256 | 0 | 23542 | 1.30 | 3.70 |
+| street (voxel mode) | 2000 | 0 | 16 | 23542 | 0.70 | 3.10 |
+| street (voxel mode) | 2000 | 256 | 16 | 23542 | 1.30 | 3.98 |
+| overview | 0 | 0 | 0 | 24881 | 0.50 | 1.06 |
+| overview | 500 | 0 | 0 | 44885 | 1.20 | 1.76 |
+| overview | 2000 | 0 | 0 | 104885 | 1.90 | 3.41 |
+| overview | 5000 | 0 | 0 | 224741 | 6.00 | 7.59 |
+| overview | 2000 | 64 | 0 | 104885 | 2.30 | 3.76 |
+| overview | 2000 | 256 | 0 | 104885 | 1.90 | 4.49 |
+| overview | 2000 | 0 | 16 | 104885 | 2.00 | 3.95 |
+| overview | 2000 | 256 | 16 | 104885 | 2.20 | 5.14 |
+
+The slices are the cost: 2000 vehicles add about 80,000 quads in the parallel view, and the frame grows with
+them. Lights cost per pixel, so they cost the same however many things are on screen: 256 point lights add
+about a millisecond at 1920 by 1080, 16 cone lights with beams about half that.
+
+Upstreamed from a game built on the engine: these came out of a night-time defence game with a horde of
+machines, searchlights and a lot of muzzle flashes, and were brought back here in a general form.
 
 ## Where a mesh is still the better tool
 
@@ -596,13 +702,13 @@ all of it, twice (whole and shell), in about a second.
 | Path | What |
 | --- | --- |
 | `index.html` | the demo page |
-| `js/engine.js` | the renderer: instances, slice pass (flat slices or voxel mode), impostors, count pass, light pass, bloom |
+| `js/engine.js` | the renderer: instances, slice pass (flat slices or voxel mode), impostors, count pass, light pass (with point and cone lights), fx hook, bloom, item pool |
 | `js/art.js` | stacks from functions: voxels, normals, shell, atlas |
 | `js/models.js` | the objects: buildings, trees, vehicles, field works, smoke |
 | `js/scene.js` | the land, the layout, the routes, the palette, the light by time of day |
 | `js/characters.js`, `js/rig.js` | the soldier and his walk |
 | `js/main.js` | what moves, the slice effects, camera, input, read-out, capture hooks |
-| `tools/bench.py` | the tables above (`--voxel` for voxel mode and the tilt sweep, `--tricks` for the faster ways) |
+| `tools/bench.py` | the tables above (`--voxel` for voxel mode and the tilt sweep, `--tricks` for the faster ways, `--hordes` for lights and hordes) |
 | `tools/capture.py`, `tools/encode.sh` | frames, MP4 and GIF of the camera tour, and a GIF of each slice effect |
 | `skills/sprite-stack-engine/SKILL.md` | the techniques written up as an agent skill |
 
@@ -616,6 +722,7 @@ python tools/bench.py --software      # CPU rasteriser
 python tools/bench.py --voxel         # voxel mode: its cost, and where flat slices open gaps
 python tools/bench.py --tricks        # voxel mode, impostors, skipping thin layers
 python tools/bench.py --weak          # resolutions, presets and ways of drawing, for slow GPUs (add --software)
+python tools/bench.py --hordes        # 0 to 5000 vehicles, 0 to 256 point lights, 0 to 16 cone lights
 sh tools/encode.sh                    # out/tour.mp4, out/tour.gif and out/fx-*.gif (needs ffmpeg)
 ```
 
