@@ -40,7 +40,8 @@
     bob: 0.35,                // hips rise and fall, twice a cycle
     twist: 0.16,              // hips turn with the leading leg (radians); the shoulders turn against it
     spine: 9.5,               // from the hips up to the shoulders (or to the top of a body without arms)
-    arms: true, shoulderHalf: 7.5, upperArm: 4.6, foreArm: 4.6, armSwing: 0.55
+    arms: true, shoulderHalf: 7.5, upperArm: 4.6, foreArm: 4.6, armSwing: 0.55,
+    idleV: 0                  // below this speed (units a second) the feet settle instead of walking (0: off; see settle)
   };
 
   function createWalker(cfg) {
@@ -61,6 +62,11 @@
   // Move the body to (x, y) facing h. Call once per fixed time step; dt only smooths the hip height.
   function step(w, x, y, h, dt) {
     const c = w.c, mx = x - w.x, my = y - w.y, dist = Math.hypot(mx, my);
+    // Standing, shuffling or turning on the spot: the distance clock would freeze with a foot in the air (a run's
+    // duty is under 0.5, so both can be), and planted feet would stay put while the hips turn over them (crossed
+    // legs). Below idleV the feet settle instead (off unless the character sets it).
+    if (c.idleV > 0 && dist / Math.max(dt || 1 / 60, 1e-4) < c.idleV) { settle(w, x, y, h, dt || 1 / 60); return; }
+    w.idle = false;
     w.x = x; w.y = y; w.h = h;
     if (dist > 1e-6) { w.dx = mx / dist; w.dy = my / dist; }
     w.phase = (w.phase + dist / c.stride) % 1;
@@ -89,6 +95,29 @@
     const want = Math.min(c.standHip, most);
     w.hipZ += (want - w.hipZ) * Math.min(1, (dt || 1 / 60) * 14);
     if (w.hipZ > most) w.hipZ = most;
+  }
+
+  // Settling: a lifted foot comes down under its hip, and a planted foot that the hips have turned or moved away
+  // from takes a short step back under it, one foot at a time. The hips ease to standing height.
+  function settle(w, x, y, h, dt) {
+    const c = w.c; w.x = x; w.y = y; w.h = h;
+    if (!w.idle) { w.idle = true; w.phase = 0; for (const f of w.feet) f.st = 0; }
+    const dur = 0.2;      // seconds for one settling step
+    let busy = -1; for (let i = 0; i < 2; i++) if (w.feet[i].st > 0) busy = i;
+    for (let i = 0; i < 2; i++) {
+      const f = w.feet[i], g = hipGround(w, i, h);
+      if (f.st > 0) {                           // a settling step in progress
+        f.st = Math.min(1, f.st + dt / dur); const e = ease(f.st);
+        f.x = f.fx + (g[0] - f.fx) * e; f.y = f.fy + (g[1] - f.fy) * e; f.z = f.lz * (1 - e) + c.lift * 0.5 * Math.sin(Math.PI * f.st); f.rot = turn(f.frot, h, e);
+        if (f.st >= 1) { f.st = 0; f.z = 0; f.planted = true; f.x = g[0]; f.y = g[1]; f.rot = h; w.steps++; }
+        continue;
+      }
+      const off = Math.hypot(f.x - g[0], f.y - g[1]), dr = Math.abs(turn(0, h - f.rot, 1));
+      if ((!f.planted || f.z > 0.01 || off > c.hipHalf * 0.9 || dr > 0.45) && busy < 0) {
+        f.st = 1e-3; f.fx = f.x; f.fy = f.y; f.frot = f.rot; f.lz = f.z; f.planted = false; busy = i;
+      }
+    }
+    w.hipZ += (c.standHip - w.hipZ) * Math.min(1, dt * 10);
   }
 
   // Everything a drawing needs, as plain data: joints are [x, y, z]. arms is empty when the character has none.
