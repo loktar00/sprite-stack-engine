@@ -668,6 +668,15 @@ a glowing pool) painted into a world-space RGB texture and added to every pixel 
 worth `scale`. Any number of static lights for one texture read; `E.patchLightMap` changes part of it.
 `?lightmap=1` in the demo (best with `&tod=1`).
 
+**Ring lights.** `opt.rings` takes up to 8: `[x, y, z, radius, width, r, g, b, glow, lift]`, a band of light
+round a centre, for a pulse that grows outward. Whatever stands in the band and near its height is lit, faces
+turned towards the band most; `glow` makes the band shine by itself, so it reads on black ground; `lift` raises
+items with `lift: true` and horde groups with `lift: true` as the band passes under them (a bump that rides the
+band). Compiled in only while there are rings. Lifting 6000 units under 8 rings costs about 0.15 ms of engine
+CPU. `?rings=6&bots=3000&tod=1` in the demo.
+
+![Six pulse rings at dusk](media/rings.png)
+
 **A hard sun, and haze by height.** `light.soft` sets the sun's shadow softness directly (near 0: the hard
 edge of a sun with no air; by default it follows the sun's height). `light.hazeH = [density, falloff]` adds
 haze that is thick at the ground and thins upward, integrated along each view ray; `hazeK: 0` turns the

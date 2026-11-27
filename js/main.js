@@ -180,14 +180,24 @@
   //   ?bots=N     N small birds (3 layers, 4 wing frames) skimming the fields, drawn from typed arrays (opt.horde:
   //               no object per bird); ?botsobj=1 draws the same through the item pool, to compare
   const BOTS = Math.max(0, num('bots', 0) | 0), BOTSOBJ = num('botsobj', 0) === 1;
-  const bot = { frames: null, n: BOTS, x: new Float32Array(BOTS), y: new Float32Array(BOTS), z: new Float32Array(BOTS), rot: new Float32Array(BOTS), frame: new Uint8Array(BOTS), fade: null, row: Q.has('rows') ? new Uint8Array(BOTS).map(function (v, i) { return i & 1; }) : null, scale: 1 }, flock = [bot];
+  const bot = { lift: true, frames: null, n: BOTS, x: new Float32Array(BOTS), y: new Float32Array(BOTS), z: new Float32Array(BOTS), rot: new Float32Array(BOTS), frame: new Uint8Array(BOTS), fade: null, row: Q.has('rows') ? new Uint8Array(BOTS).map(function (v, i) { return i & 1; }) : null, scale: 1 }, flock = [bot];
   function bots(t, set) {
     if (!bot.frames) bot.frames = ['bird0', 'bird1', 'bird2', 'bird1'].map(function (k) { return set.stacks[k]; });
     const W = Scene.WORLD.w - 40, H = Scene.WORLD.h - 40;
     for (let i = 0; i < BOTS; i++) {
       const v = 10 + (i % 7) * 1.5, dir = i & 1 ? -1 : 1, x = 20 + ((((i * 37.3 + dir * t * v) % W) + W) % W), y = 20 + (i * 0.618034 * H) % H + Math.sin(t * 1.3 + i) * 4;
       bot.x[i] = x; bot.y[i] = y; bot.z[i] = Scene.groundAt(x, y) + 4 + (i % 5); bot.rot[i] = dir > 0 ? 0 : Math.PI; bot.frame[i] = (Math.floor(t * 10 + i) & 3);
-      if (BOTSOBJ) pool.add(bot.frames[bot.frame[i]], x, y, bot.z[i], bot.rot[i], 1).row = bot.row ? bot.row[i] : 0;
+      if (BOTSOBJ) { const it = pool.add(bot.frames[bot.frame[i]], x, y, bot.z[i], bot.rot[i], 1); it.row = bot.row ? bot.row[i] : 0; it.lift = true; }
+    }
+  }
+  //   ?rings=N    N pulse rings, each growing from a point to 140 units in 2.5 s and starting again: a band of
+  //               cold light on the ground that lifts the birds and vehicles it passes under
+  const NRINGS = Math.max(0, Math.min(8, num('rings', 0) | 0)), rings = [];
+  function pulses(t) {
+    rings.length = 0;
+    for (let i = 0; i < NRINGS; i++) {
+      const u = ((t / 2.5 + i * 0.37) % 1), cx = 140 + (i * 97) % 260, cy = 110 + (i * 61) % 170, k = 1 - u;
+      rings.push([cx, cy, Scene.groundAt(cx, cy), 4 + u * 140, 5 + u * 4, 0.6 * k * 2.2, 1.4 * k * 2.2, 2.2 * k * 2.2, 0.9 * k, 6 * k]);
     }
   }
   const HORDE = Math.max(0, num('horde', 0) | 0), NLIGHTS = Math.max(0, num('lights', 0) | 0), NCONES = Math.max(0, num('cones', 0) | 0);
@@ -201,7 +211,7 @@
       const r = i % rows, k = (i / rows) | 0, dir = r & 1 ? -1 : 1, y = 24 + (r + 0.5) * (Scene.WORLD.h - 48) / rows;
       const x = 20 + ((((k * W / 60 + dir * t * 9) % W) + W) % W), h = dir > 0 ? 0 : Math.PI, z = Scene.groundAt(x, y);
       const it = pool.add(set.stacks[i % 3 ? 'jeep' : 'halftrack'], x, y, z + 0.3 * Math.abs(Math.sin(x * 0.33 + i)), h);
-      it.fade = Math.max(0, 1 - Math.min(x - 20, W + 20 - x) / 12);      // they fade in and out where the columns wrap round
+      it.fade = Math.max(0, 1 - Math.min(x - 20, W + 20 - x) / 12); it.lift = true;      // they fade in and out where the columns wrap round
       if (i % lstep === 0 && i / lstep < NLIGHTS) { const c = (i / lstep) % 3; lamps.push([x + dir * 6, y, z + 8, 42, c === 0 ? 2.6 : c === 1 ? 1.1 : 2.6, c === 0 ? 1.5 : c === 1 ? 1.5 : 0.45, c === 0 ? 0.5 : c === 1 ? 2.3 : 0.3, i < 8 * lstep ? 1 : 0, 0.8]); }
       if (i % cstep === 0 && i / cstep < NCONES) cones.push([x + dir * 4, y, z + 14, 150, dir, 0, -0.55, 0.42, 1.5, 1.4, 1.1, 1.2]);      // a searchlight on its roof
     }
@@ -347,6 +357,7 @@
     });
     r.lamps = o.lamps.map(function (l) { return sc(l, 4); }); r.blobs = o.blobs.map(function (b) { return sc(b, 5); });
     r.cones = o.cones.map(function (c) { const k = sc(c, 4); return k; }); r.coneBlockers = o.coneBlockers && o.coneBlockers.map(function (b) { return sc(b, 4); });
+    r.rings = o.rings.map(function (g) { return g.map(function (v, i) { return i < 5 || i === 9 ? v * u : v; }); });
     r.ground = (o.ground || 0) * u; r.unit = u; r.impostors = null; r.horde = null;
     return r;
   }
@@ -361,14 +372,14 @@
       const P = Rig.pose(k.rig), lift = Scene.groundAt(P.x * SCALE, P.y * SCALE); C.draw(Engine.figureWriter(list, SCALE, lift), set.chars.soldier, P);
       blobs.push([P.x * SCALE, P.y * SCALE, lift + C.height * SCALE, 3, lift - 1]);
     });
-    animate(t, set); effects(t); pool.begin(list); if (HORDE) horde(t, set); if (BOTS) bots(t, set);
+    animate(t, set); effects(t); pool.begin(list); if (HORDE) horde(t, set); if (BOTS) bots(t, set); if (NRINGS) pulses(t);
     // impostors only where they hold: the parallel camera, with the depth test on, and once they are baked for this tilt
     const baked = S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
     sprites.length = 0; sheet = baked;
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
     const RO = { cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
-      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr') };      // ?hdr=1: the half-float picture (see the README)
+      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings };      // ?hdr=1: the half-float picture (see the README)
     E.render(UNIT !== 1 ? inUnits(RO, UNIT) : RO);
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);

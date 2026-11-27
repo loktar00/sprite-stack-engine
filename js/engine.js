@@ -29,7 +29,7 @@
   const FL = 12;                      // floats per instance: pos 3, rot 1, rect 4 (the fade rides in its first: see a_rectf), offset 2, scale 1, box height 1 (voxel mode)
   const NB = 2048, ZQ = 16;           // height buckets, and buckets per unit of height
   const HMAX = 128;                   // tallest thing the G-buffer and the height map can hold
-  const LIGHTS = 256, CONES = 16, BINS = 64, BLOBS = 24, STEPS = 48, REACH = 195;     // point lights, cone lights, bins per cone in its shadow table
+  const LIGHTS = 256, CONES = 16, BINS = 64, RINGS = 8, BLOBS = 24, STEPS = 48, REACH = 195;     // point lights, cone lights, bins per cone in its shadow table
   const ANGLES = 32, IMP_W = 4096, IMP_H = 2048, IMP_PPU = 3, IL = 15;      // impostors: views per stack, their atlas, its pixels per unit, floats per sprite
 
   // ---------------------------------------------------------------- small matrix helpers (column-major 4x4)
@@ -294,7 +294,11 @@
   #define GROUND_ON 0
   #define LIGHTMAP_ON 0
   #define HDR_ON 0
+  #define RINGS_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  #if RINGS_ON
+  uniform vec4 u_ring[${RINGS}], u_ringCol[${RINGS}]; uniform float u_ringGlow[${RINGS}]; uniform int u_nr;     // rings: x y z radius / r g b width / the band's own glow
+  #endif
   #if GROUND_ON
   uniform sampler2D u_gm; uniform vec4 u_gmBox;     // the ground map, and where it lies: x0, y0, width, depth
   #endif
@@ -555,6 +559,21 @@
     vec2 lu = (p.xy - u_lmBox.xy) / u_lmBox.zw;
     if (lu.x >= 0.0 && lu.y >= 0.0 && lu.x <= 1.0 && lu.y <= 1.0) irr += textureLod(u_lm, lu, 0.0).rgb * u_lmK;
 #endif
+#if RINGS_ON
+    // RING LIGHTS: a band of light round a centre (an expanding pulse). What is in the band and near its height is
+    // lit, faces turned towards the band's middle line most; the band itself can also shine (its glow), so it reads
+    // on ground that is black.
+    vec3 ringE = vec3(0.0);
+    for (int i = 0; i < ${RINGS}; i++) {
+      if (i >= u_nr) break;
+      vec4 G = u_ring[i], C = u_ringCol[i]; vec2 dv = p.xy - G.xy; float r = length(dv), w = max(C.w, 1e-3);
+      float d = (r - G.w) / w, band = exp(-d * d * 2.0) * exp(-max(p.z - G.z, 0.0) / (w * 2.0));
+      if (band < 0.002) continue;
+      vec3 toMid = vec3(-dv / max(r, 1e-3) * sign(d), 0.6); toMid = toMid / max(length(toMid), 1e-4);
+      irr += C.rgb * band * (0.35 + 0.65 * max(dot(n, toMid), 0.0));
+      ringE += C.rgb * u_ringGlow[i] * band * band;
+    }
+#endif
     if (u_lampCap > 0.0) irr = irr / (1.0 + max(irr.r, max(irr.g, irr.b)) * u_lampCap);
     col += alb * irr;
     // Pixels that shine. A glow of 1 in the palette always shines (fire). A smaller glow is a lamp or a window:
@@ -576,6 +595,9 @@
     // beam seen down its length cannot white the frame out
     halo = halo / (1.0 + max(halo.r, max(halo.g, halo.b)) * 0.8); beam = beam / (1.0 + max(beam.r, max(beam.g, beam.b)) * 1.2);
     col += (halo + beam) * (1.0 - fade);
+#if RINGS_ON
+    col += ringE * (1.0 - fade);
+#endif
     o = vec4(finish(col), e * (1.0 - fade));
   }`;
   const FS_HEAT = `#version 300 es
@@ -740,7 +762,7 @@
       for (let i = 0; i < 2; i++) { bloom[i] = texture(bw, bh, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR); fboBloom[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloom[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloom[i], 0); }
     }
 
-    const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
+    const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, RINGS: RINGS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
     let palTex = null, hmTex = null, hmBox = [0, 0, 1, 1], hmStep = 0.5, query = null, timing = false;
     let gmTex = null, gmBox = null, lmTex = null, lmBox = null, lmK = 1;
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
@@ -820,15 +842,15 @@
     // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind),
     // zs (optional: each layer drawn zs times as tall), fade (optional, 0 to 1: the share of its pixels left out),
     // each (optional: function (layer, layers, out) -> out or null, moves or hides single slices: the slice effects),
-    // reach (optional: how far each can move a slice, for culling; 60 if not given),
+    // reach (optional: how far each can move a slice, for culling; 60 if not given), lift (optional: rings lift it),
     // row (optional: the palette row it is drawn in, 0 to 63, see setPalette) }]
-    // horde (optional, opt.horde): [{ frames: [stack, ...], n, x, y, z, rot, frame, fade, row, scale }], thousands of units
+    // horde (optional, opt.horde): [{ frames: [stack, ...], n, x, y, z, rot, frame, fade, row, scale, lift }], thousands of units
     // as typed arrays with no object per unit: x, y, rot Float32Array; z Float32Array or null (0); frame Uint8Array
     // or null (an index into frames: a walk or a flap, one stack per frame); fade Uint8Array or null (0..255); row
     // Uint8Array or null (the palette row: a hit flash, a unit powered down). Each
     // unit goes through the same culling and instance writing as an item (one scratch item, reused).
     const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
-    const NOHORDE = [], unit = { stack: null, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1, shx: 0, shy: 0, zs: 1, fade: 0, row: 0, each: null, reach: 0 };
+    const lift = new Float32Array(RINGS * 7), NOHORDE = [], unit = { stack: null, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1, shx: 0, shy: 0, zs: 1, fade: 0, row: 0, lift: false, each: null, reach: 0 };
     function build(list, M, opt) {
       const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel, U = opt.unit || 1, zq = ZQ / U;      // zq: height buckets per world unit
       let n = 0, slices = 0, tallest = 0;
@@ -837,7 +859,17 @@
       const slope = Math.tan(Math.max(0.06, M.ortho ? opt.cam.pitch : opt.cam.pitch - opt.cam.fov * 0.35));
       // the items, then the horde's units one by one through the same body (no closure: n stays a local, and the
       // instance loops below stay fast)
-      const H = opt.horde || NOHORDE, L = list.length;
+      const H = opt.horde || NOHORDE, L = list.length, RG = opt.rings || NOHORDE;
+      // the rings that lift (see opt.rings), each with the square of the inner and outer edge of its band (two widths
+      // either side of its radius), so most things are passed over without a square root
+      let lifting = 0;
+      for (let r = 0; r < RG.length && r < RINGS; r++) { const g = RG[r]; if (!(g[9] > 0)) continue; const w = Math.max(g[4], 1e-3), a = Math.max(0, g[3] - 2 * w), b = g[3] + 2 * w, o = lifting++ * 7; lift[o] = g[0]; lift[o + 1] = g[1]; lift[o + 2] = g[3]; lift[o + 3] = 1 / w; lift[o + 4] = g[9]; lift[o + 5] = a * a; lift[o + 6] = b * b; }
+      // how far the rings lift a thing standing at (x, y): a bump that rides the band, its lift high at the band's middle
+      const ringLift = function (x, y) {
+        let z = 0;
+        for (let r = 0; r < lifting; r++) { const o = r * 7, dx = x - lift[o], dy = y - lift[o + 1], q = dx * dx + dy * dy; if (q < lift[o + 5] || q > lift[o + 6]) continue; const d = (Math.sqrt(q) - lift[o + 2]) * lift[o + 3]; z = Math.max(z, lift[o + 4] * Math.exp(-d * d * 2)); }
+        return z;
+      };
       let gi = 0, ui = 0;
       for (let q = 0; ; q++) {
         let it;
@@ -847,12 +879,14 @@
           if (gi >= H.length) break;
           const G = H[gi], i = ui++;
           unit.stack = G.frames[G.frame ? G.frame[i] : 0]; unit.x = G.x[i]; unit.y = G.y[i]; unit.z = G.z ? G.z[i] : 0; unit.rot = G.rot ? G.rot[i] : 0;
-          unit.scale = G.scale || 1; unit.fade = G.fade ? G.fade[i] / 255 : 0; unit.row = G.row ? G.row[i] : 0; it = unit;
+          unit.scale = G.scale || 1; unit.fade = G.fade ? G.fade[i] / 255 : 0; unit.row = G.row ? G.row[i] : 0; unit.lift = !!G.lift; it = unit;
         }
         // sc, zs: the item's scale and how much taller each layer is drawn (zs, optional), with the stack's own sampling (art.js: res, zres)
         const st = it.stack, sc = it.scale * (st.k || 1), one = it.only >= 0, zs = (it.zs || 1) * (st.kz || 1), zk = (st.k || 1) * (st.kz || 1);
+        // iz: the item's height, plus the lift of any ring crossing it (rings with a lift, items and horde groups with lift: true)
+        const iz = it.z + (lifting && it.lift ? ringLift(it.x, it.y) : 0);
         // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
-        const zc = one ? it.z : it.z + st.n * sc * zs * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * zs * 0.5)) * sc + (it.each ? it.reach || 60 * U : 2 * U);      // reach: how far an effect can move slices
+        const zc = one ? iz : iz + st.n * sc * zs * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * zs * 0.5)) * sc + (it.each ? it.reach || 60 * U : 2 * U);      // reach: how far an effect can move slices
         const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15], cx = vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12], cy = vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13];
         if (!M.ortho && cw < -R) continue;                     // behind the camera
         if ((M.ortho || cw > R) && (Math.abs(cx) - R * M.px > cw || Math.abs(cy) - R * M.py > cw)) continue;
@@ -864,8 +898,8 @@
           else {
             // the nearest this stack can be: its middle less its radius, but no nearer than where the lowest ray on
             // screen comes down to the stack's top (a ground tile under the camera is not really four units away)
-            const reach = (M.eye[2] - it.z - st.n * sc * zs) / Math.sin(Math.min(1.5, opt.cam.pitch + opt.cam.fov / 2)) * Math.cos(opt.cam.fov / 2);
-            const d = Math.max(4 * U, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * zs * 1.15;
+            const reach = (M.eye[2] - iz - st.n * sc * zs) / Math.sin(Math.min(1.5, opt.cam.pitch + opt.cam.fov / 2)) * Math.cos(opt.cam.fov / 2);
+            const d = Math.max(4 * U, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (iz - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * zs * 1.15;
           }
         }
         if (rows > tallest && sides && Math.abs(cx) < cw && Math.abs(cy) < cw) tallest = rows;      // the tallest layer on screen (of stacks whose middle is in view and that have sides to fill)
@@ -880,7 +914,7 @@
         if (n + (b - a) * copies * 4 > cap) { while (n + (b - a) * copies * 4 > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
           if (skip > 1 && (b - 1 - s) % skip) continue;
-          const sl = src[s], first = sl.sides ? 0 : copies - 1; let x0 = it.x, y0 = it.y, z0 = it.z + (one ? 0 : sl.z * sc * zs), rot = it.rot, k1 = sc;
+          const sl = src[s], first = sl.sides ? 0 : copies - 1; let x0 = it.x, y0 = it.y, z0 = iz + (one ? 0 : sl.z * sc * zs), rot = it.rot, k1 = sc;
           if (it.each) { const m = it.each(sl.z * zk, st.n * zk, moved); if (!m) continue; x0 += m.dx; y0 += m.dy; z0 += m.dz; rot += m.rot; k1 *= m.scale; }
           slices++;
           // a hollow slice is drawn as the strips round its hole (see art.js), unless that is switched off
@@ -889,14 +923,14 @@
             const pt = parts[pi];
             if (voxel) {
               // VOXEL MODE: one box per slice or run, as tall as the layers it stands for (paper thin, at the top of its layer, for ground with no side)
-              const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
+              const j = n * FL, up = z0 - iz, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 * zs : 0); tmp[j + 3] = rot;
               tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v + row; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1 * zs;
               keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * zq)));      // highest first; the depth test does the rest
               continue;
             }
             for (let k = first; k < copies; k++) {
-              const z = z0 + k / copies * k1 * zs, j = n * FL, up = z - it.z;
+              const z = z0 + k / copies * k1 * zs, j = n * FL, up = z - iz;
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
               tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v + row; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
               let key = Math.min(NB - 1, Math.max(0, Math.floor(z * zq))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
@@ -984,6 +1018,7 @@
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
     //        lamps [[x, y, z, reach, r, g, b, occlude, halo]] (up to 256), lampCap (roll off the lights' sum: 0 off),
     //        cones [[x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]] (up to 16), coneBlockers [[x, y, radius, height]],
+    //        rings [[x, y, z, radius, width, r, g, b, glow, lift]] (up to 8: a band of light round a centre, an expanding pulse),
     //        blobs [[x, y, top, radius, bottom]], fx (function (gl, M, size): draws into the lit picture, see the README) }
     E.render = function (opt) {
       const t0 = performance.now(), W = canvas.width, H = canvas.height, env = opt.light;
@@ -1024,12 +1059,19 @@
       // the light pass: once per pixel
       // (with cones, the build of the shader that has them, made the first time it is needed)
       const ns = Math.min(CONES, (opt.cones || []).length);
+      const nr = Math.min(RINGS, (opt.rings || []).length);
       const HD = opt.hdr && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
-      const on = (ns ? ['CONES_ON'] : []).concat(rowsOn ? ['ROWS_ON'] : [], gmTex ? ['GROUND_ON'] : [], lmTex ? ['LIGHTMAP_ON'] : [], HD ? ['HDR_ON'] : []);
+      const on = (ns ? ['CONES_ON'] : []).concat(rowsOn ? ['ROWS_ON'] : [], gmTex ? ['GROUND_ON'] : [], lmTex ? ['LIGHTMAP_ON'] : [], HD ? ['HDR_ON'] : [], nr ? ['RINGS_ON'] : []);
       const pl = on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight, u = pl.u, sun = env.sun;
       gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
       if (rowsOn) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
+      if (nr) {
+        // rings: [x, y, z, radius, width, r, g, b, glow, lift]
+        const rp = new Float32Array(RINGS * 4), rc = new Float32Array(RINGS * 4), rg = new Float32Array(RINGS);
+        for (let i = 0; i < nr; i++) { const g = opt.rings[i]; rp.set([g[0], g[1], g[2], g[3]], i * 4); rc.set([g[5], g[6], g[7], Math.max(1e-3, g[4])], i * 4); rg[i] = g[8] || 0; }
+        gl.uniform4fv(u.u_ring, rp); gl.uniform4fv(u.u_ringCol, rc); gl.uniform1fv(u.u_ringGlow, rg); gl.uniform1i(u.u_nr, nr);
+      }
       if (gmTex) { gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, gmTex); gl.uniform1i(u.u_gm, 8); gl.uniform4fv(u.u_gmBox, gmBox); }
       if (lmTex) { gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.uniform1i(u.u_lm, 9); gl.uniform4fv(u.u_lmBox, lmBox); gl.uniform1f(u.u_lmK, lmK); }
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
@@ -1130,7 +1172,7 @@
       add: function (stack, x, y, z, rot, scale) {
         let it = pool[n]; if (!it) { it = {}; pool.push(it); } n++;
         it.stack = stack; it.x = x; it.y = y; it.z = z || 0; it.rot = rot || 0; it.scale = scale || 1; it.only = -1;
-        it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.row = 0; it.each = null; it.reach = 0;
+        it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.row = 0; it.lift = false; it.each = null; it.reach = 0;
         out.push(it); return it;
       },
       get size() { return pool.length; }
