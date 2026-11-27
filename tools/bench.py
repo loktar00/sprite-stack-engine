@@ -15,7 +15,7 @@ hollow slices drawn whole and in strips, and in voxel mode. Add --software for a
 --tricks measures the faster ways to draw (voxel mode, impostors, skipping thin layers): each alone and all
 together, against plain quads, with hidden-surface removal and shell stacks on throughout.
 --hordes measures lights and hordes: the street and overview views at dusk with 0 to 5000 vehicles from the item
-pool, and 0 to 256 point lights and 0 to 16 cone lights on them (the page's ?horde, ?lights and ?cones); then 0 to
+pool, and 0 to 256 point lights and 0 to 16 cone lights on them (the page's ?stress=1 with ?horde, ?lights and ?cones); then 0 to
 6000 small birds drawn from typed arrays (opt.horde) and through the item pool (?bots, ?botsobj).
 """
 import argparse, asyncio, json, os, pathlib
@@ -61,7 +61,7 @@ async def main():
             print('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
             for view, vox in [('street', 1), ('overview', 0)]:
                 for n, nl, nc in [(0, 0, 0), (500, 0, 0), (2000, 0, 0), (5000, 0, 0), (2000, 64, 0), (2000, 256, 0), (2000, 0, 16), (2000, 256, 16)]:
-                    await page.goto(url + '&horde=%d&lights=%d&cones=%d&tod=1' % (n, nl, nc))
+                    await page.goto(url + '&stress=1&horde=%d&lights=%d&cones=%d&tod=1' % (n, nl, nc))
                     await page.wait_for_function('window.demo && window.demo.ready', timeout=20000)
                     await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': 'native', 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox})
                     m = await page.evaluate('demo.measure(0)')
@@ -74,7 +74,7 @@ async def main():
             print('| --- | --- | ---: | --- | ---: | ---: | ---: |')
             for view, vox, res in [('overview', 1, 360), ('overview', 0, 'native')]:
                 for n, obj in [(0, 0), (1000, 0), (1000, 1), (6000, 0), (6000, 1)]:
-                    await page.goto(url + '&bots=%d&botsobj=%d' % (n, obj))
+                    await page.goto(url + '&stress=1&bots=%d&botsobj=%d' % (n, obj))
                     await page.wait_for_function('window.demo && window.demo.ready', timeout=20000)
                     await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': res, 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox})
                     m = await page.evaluate('demo.measure(0)')

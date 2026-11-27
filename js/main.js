@@ -26,26 +26,42 @@
     Object.keys(Characters).forEach(function (c) { chars[c] = {}; Characters[c].parts.forEach(function (d) { chars[c][d.name] = Art.buildStack(d, pal, atlas, shell); }); });
     SETS.push({ stacks: stacks, chars: chars, atlas: E.makeAtlas(atlas.data, atlas.size), pixels: atlas.used });
   });
-  // ?rows=1: a second palette row (every colour pushed to a hot red-white, a hit flash) that half the ?bots birds use
-  if (Q.has('rows')) { const b = pal.bytes(), two = new Uint8Array(b.length * 2); two.set(b); for (let i = 0; i < 256; i++) { const o = b.length + i * 4; two[o] = 255; two[o + 1] = Math.min(255, 90 + b[i * 4 + 1]); two[o + 2] = Math.min(255, 60 + b[i * 4 + 2] * 0.5); two[o + 3] = 255; } E.setPalette(two, 2); }
+  // ?rows=1: a second palette row, every colour washed most of the way to white and shining a little: the flash
+  // that runs through the ?bots flocks
+  if (Q.has('rows')) { const b = pal.bytes(), two = new Uint8Array(b.length * 2); two.set(b); for (let i = 0; i < 256; i++) { const o = b.length + i * 4; for (let c = 0; c < 3; c++) two[o + c] = Math.round(b[i * 4 + c] * 0.3 + 255 * 0.7); two[o + 3] = 140; } E.setPalette(two, 2); }
   else E.setPalette(pal.bytes());
   // ?unit=0.1: the same scene in other world units (every position, size and the camera times 0.1, opt.unit 0.1):
   // a test that the light pass is free of art-pixel numbers. It should look the same.
   const UNIT = Q.has('unit') ? parseFloat(Q.get('unit')) || 1 : 1;
-  // ?groundmap=1: the open ground round the map from a ground map (two palette indices and a wear per 4-unit cell),
-  // with a ring of worn track patched in; ?lightmap=1: warm and cold pools of light from a light map
+  // ?groundmap=1: the country round the map from a ground map (a 4-unit cell, two palette indices and a wear): the
+  // road carried on past both edges as worn ruts, fields of pasture and plough, and a few old shell scorches,
+  // in the village's own colours. The map itself is drawn by its tiles; the ground map shows past its edge.
+  // ?lightmap=1: the street lamps on the road's poles as a light map (warm pools, one read for all of them); it
+  // follows the time of day, off by day and up at dusk.
   if (Q.has('groundmap')) {
-    const gw = 384, gh = 288, g = new Uint8Array(gw * gh * 4), A = pal.names.grass2, B = pal.names.dirt;
-    for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) { const o = (y * gw + x) * 4; g[o] = A; g[o + 1] = B; g[o + 2] = Math.round(255 * Math.max(0, Math.min(1, Art.noise(x / 9, y / 9, 3) * 1.6 - 0.45))); g[o + 3] = 255; }
-    E.setGroundMap(g, gw, gh, [-512 * UNIT, -384 * UNIT, 1536 * UNIT, 1152 * UNIT]);
-    const r = 16, patch = new Uint8Array((2 * r + 1) * (2 * r + 1) * 4);
-    for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) { const o = ((y + r) * (2 * r + 1) + x + r) * 4, d = Math.abs(Math.hypot(x, y) - 12); patch[o] = A; patch[o + 1] = B; patch[o + 2] = d < 1.5 ? 255 : 0; patch[o + 3] = 255; }
-    E.patchGroundMap(patch, 96 - r, 150 - r, 2 * r + 1, 2 * r + 1);
+    const gw = 384, gh = 288, g = new Uint8Array(gw * gh * 4), N = pal.names, x0 = -512, y0 = -384, cs = 4;
+    const crater = [[-60, 120, 11], [580, 230, 14], [200, -50, 9], [-120, 300, 12], [620, 60, 10]];
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+      const o = (j * gw + i) * 4, x = x0 + (i + 0.5) * cs, y = y0 + (j + 0.5) * cs;
+      const fx = Math.floor((x + 40 * Art.noise(x / 160, y / 160, 5)) / 118), fy = Math.floor((y + 40 * Art.noise(x / 160, y / 160, 6)) / 118), lot = Art.hash(fx, fy, 7);
+      let A = lot < 0.4 ? N.pasture : lot < 0.62 ? N.grass2 : lot < 0.8 ? N.grass : N.dirt2, B = lot < 0.62 ? N.grassDry : N.earth, wear = Art.noise(x / 37, y / 37, 8) * 120;
+      const dr = Math.abs(y - Scene.roadY(x));
+      if (dr < 7) { A = N.dirt; B = N.rut; wear = Math.abs(dr - 3.4) < 1 ? 230 : 60; }
+      else if (dr < 9) { A = N.grassDry; B = N.dirt; wear = 120; }
+      crater.forEach(function (c) { const d = Math.hypot(x - c[0], y - c[1]); if (d < c[2]) { A = N.earth; B = N.scorch; wear = 255 * (1 - d / c[2]); } else if (d < c[2] * 1.8) { B = N.scorch; wear = Math.max(wear, 140 * (1 - (d - c[2]) / (c[2] * 0.8))); } });
+      g[o] = A; g[o + 1] = B; g[o + 2] = Math.max(0, Math.min(255, Math.round(wear))); g[o + 3] = 255;
+    }
+    E.setGroundMap(g, gw, gh, [x0 * UNIT, y0 * UNIT, gw * cs * UNIT, gh * cs * UNIT]);
   }
   if (Q.has('lightmap')) {
-    const lw = 128, lh = 96, l = new Uint8Array(lw * lh * 4), spots = [[200, 190, 30, 1, 0.6, 0.25], [330, 120, 26, 0.3, 0.6, 1], [120, 260, 34, 1, 0.35, 0.15]];
-    for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) { const o = (y * lw + x) * 4; let c = [0, 0, 0]; spots.forEach(function (S) { const k = Math.max(0, 1 - Math.hypot(x * 4 - S[0], y * 4 - S[1]) / S[2]); c = c.map(function (v, i) { return v + S[3 + i] * k * k; }); }); l[o] = Math.min(255, c[0] * 255); l[o + 1] = Math.min(255, c[1] * 255); l[o + 2] = Math.min(255, c[2] * 255); l[o + 3] = 255; }
-    E.setLightMap(l, lw, lh, [0, 0, 512 * UNIT, 384 * UNIT], 1.5);
+    const lw = 256, lh = 192, l = new Uint8Array(lw * lh * 4), poles = [];
+    for (let x = 30; x < Scene.WORLD.w; x += 68) poles.push([x, Scene.roadY(x) - 13]);      // where the scene puts its poles
+    for (let j = 0; j < lh; j++) for (let i = 0; i < lw; i++) {
+      const o = (j * lw + i) * 4, x = (i + 0.5) * 2, y = (j + 0.5) * 2; let k = 0;
+      poles.forEach(function (p) { const d = Math.hypot(x - p[0], y - p[1]) / 34; if (d < 1) k += (1 - d) * (1 - d); });
+      k = Math.min(1, k); l[o] = Math.round(255 * k); l[o + 1] = Math.round(190 * k); l[o + 2] = Math.round(110 * k); l[o + 3] = 255;
+    }
+    E.setLightMap(l, lw, lh, [0, 0, 512 * UNIT, 384 * UNIT], 1);
   }
 
   const LAYOUT = Scene.layout();
@@ -173,25 +189,41 @@
   let list = [], sprites = [], sheet = null, blobs = [], lamps = [], frame = 0, env = Scene.light(0), scale = 1;
 
   // ---------------------------------------------------------------- lights and hordes (off unless asked for)
-  //   ?horde=N    N vehicles (jeeps and halftracks) in columns crossing the map, drawn from a pool of items
-  //   ?lights=N   a point light on N of them, spread through the columns (up to 256): 8 shadowed by the height map, all with a halo
-  //   ?cones=N    searchlights on N of them (up to 16): a pool and a beam each, cut by the map's trees and buildings
-  // e.g. ?horde=2000&lights=256&cones=16&tod=1 (a convoy at dusk). bench.py --hordes measures them.
-  //   ?bots=N     N small birds (3 layers, 4 wing frames) skimming the fields, drawn from typed arrays (opt.horde:
-  //               no object per bird); ?botsobj=1 draws the same through the item pool, to compare
-  const BOTS = Math.max(0, num('bots', 0) | 0), BOTSOBJ = num('botsobj', 0) === 1;
-  const bot = { lift: true, frames: null, n: BOTS, x: new Float32Array(BOTS), y: new Float32Array(BOTS), z: new Float32Array(BOTS), rot: new Float32Array(BOTS), frame: new Uint8Array(BOTS), fade: null, row: Q.has('rows') ? new Uint8Array(BOTS).map(function (v, i) { return i & 1; }) : null, scale: 1 }, flock = [bot];
+  //   ?horde=N    a convoy of N vehicles (up to 9, all the road holds) along the road at a steady speed and a safe gap
+  //   ?lights=N   N point lights on them, two a vehicle: a warm lamp ahead, a dim red tail light behind
+  //   ?cones=N    headlamps on the first N of them (up to 16): a pool and a beam each, cut by trees and buildings
+  //   ?bots=N     N birds (up to 600) in a few flocks wheeling over the fields, drawn from typed arrays (opt.horde:
+  //               no object per bird); with ?rows=1 a flash runs out through each flock now and then (a palette row)
+  // e.g. ?horde=9&lights=18&cones=9&tod=1 (a convoy at dusk), ?bots=400&rows=1.
+  //   ?stress=1   the raw cases bench.py measures instead: ?horde in rows over the whole map (thousands, with no
+  //               regard for the village), ?bots spread evenly over it, ?botsobj=1 the same through the item pool.
+  //               They are for measuring, not for looking at.
+  const STRESS = Q.has('stress');
+  const BOTS = Math.max(0, Math.min(STRESS ? 1e5 : 600, num('bots', 0) | 0)), BOTSOBJ = num('botsobj', 0) === 1;
+  const bot = { lift: true, frames: null, n: BOTS, x: new Float32Array(BOTS), y: new Float32Array(BOTS), z: new Float32Array(BOTS), rot: new Float32Array(BOTS), frame: new Uint8Array(BOTS), fade: null, row: Q.has('rows') ? new Uint8Array(BOTS) : null, scale: STRESS ? 1 : 0.8 }, flock = [bot];
+  const FLOCKS = [[150, 270, 60, 26, 1], [380, 90, 55, 34, -1], [420, 280, 48, 30, 1], [90, 110, 50, 38, -1]];      // x, y, radius, height over the ground, turn
   function bots(t, set) {
     if (!bot.frames) bot.frames = ['bird0', 'bird1', 'bird2', 'bird1'].map(function (k) { return set.stacks[k]; });
     const W = Scene.WORLD.w - 40, H = Scene.WORLD.h - 40;
     for (let i = 0; i < BOTS; i++) {
-      const v = 10 + (i % 7) * 1.5, dir = i & 1 ? -1 : 1, x = 20 + ((((i * 37.3 + dir * t * v) % W) + W) % W), y = 20 + (i * 0.618034 * H) % H + Math.sin(t * 1.3 + i) * 4;
-      bot.x[i] = x; bot.y[i] = y; bot.z[i] = Scene.groundAt(x, y) + 4 + (i % 5); bot.rot[i] = dir > 0 ? 0 : Math.PI; bot.frame[i] = (Math.floor(t * 10 + i) & 3);
-      if (BOTSOBJ) { const it = pool.add(bot.frames[bot.frame[i]], x, y, bot.z[i], bot.rot[i], 1); it.row = bot.row ? bot.row[i] : 0; it.lift = true; }
+      let x, y, z, rot;
+      if (STRESS) {                                            // evenly over the map
+        const v = 10 + (i % 7) * 1.5, dir = i & 1 ? -1 : 1; x = 20 + ((((i * 37.3 + dir * t * v) % W) + W) % W); y = 20 + (i * 0.618034 * H) % H + Math.sin(t * 1.3 + i) * 4;
+        z = Scene.groundAt(x, y) + 4 + (i % 5); rot = dir > 0 ? 0 : Math.PI; bot.frame[i] = (Math.floor(t * 10 + i) & 3);
+      } else {                                                 // a flock: each bird on its own circle round the flock's centre, which drifts
+        const F = FLOCKS[i % FLOCKS.length], j = (i / FLOCKS.length) | 0, h1 = Art.hash(i, 1, 9), h2 = Art.hash(i, 2, 9), h3 = Art.hash(i, 3, 9);
+        const cx = F[0] + 30 * Math.sin(t * 0.11 + F[1]), cy = F[1] + 24 * Math.cos(t * 0.09 + F[0]), r = F[2] * (0.35 + 0.65 * Math.sqrt(h1)), a = F[4] * t * (0.42 + 0.1 * h2) + h3 * 6.2832 + j * 0.0;
+        x = cx + Math.cos(a) * r; y = cy + Math.sin(a) * r * 0.8; z = Scene.groundAt(cx, cy) + F[3] + 10 * h2 + 3 * Math.sin(t * 1.7 + i);
+        rot = a + F[4] * Math.PI / 2; bot.frame[i] = Math.sin(t * 0.6 + h1 * 9) > 0.55 ? 1 : (Math.floor(t * 9 + h3 * 4) & 3);      // now and then a glide
+        // the flash: a ring that runs out from the flock's centre every few seconds
+        if (bot.row) { const w = ((t * 0.35 + F[0] * 0.01) % 1) * F[2] * 1.4; bot.row[i] = Math.abs(Math.hypot(x - cx, (y - cy) / 0.8) - w) < 4 ? 1 : 0; }
+      }
+      bot.x[i] = x; bot.y[i] = y; bot.z[i] = z; bot.rot[i] = rot;
+      if (BOTSOBJ) { const it = pool.add(bot.frames[bot.frame[i]], x, y, z, rot, bot.scale); it.row = bot.row ? bot.row[i] : 0; it.lift = true; }
     }
   }
-  //   ?rings=N    N pulse rings, each growing from a point to 140 units in 2.5 s and starting again: a band of
-  //               cold light on the ground that lifts the birds and vehicles it passes under
+  //   ?rings=N    N pulse rings (up to 8), each growing from a point to 140 units in 2.5 s and starting again: a band
+  //               of cold light on the ground that lifts the birds and vehicles it passes under
   const NRINGS = Math.max(0, Math.min(8, num('rings', 0) | 0)), rings = [];
   function pulses(t) {
     rings.length = 0;
@@ -200,23 +232,38 @@
       rings.push([cx, cy, Scene.groundAt(cx, cy), 4 + u * 140, 5 + u * 4, 0.6 * k * 2.2, 1.4 * k * 2.2, 2.2 * k * 2.2, 0.9 * k, 6 * k]);
     }
   }
-  const HORDE = Math.max(0, num('horde', 0) | 0), NLIGHTS = Math.max(0, num('lights', 0) | 0), NCONES = Math.max(0, num('cones', 0) | 0);
+  const HORDE = Math.max(0, Math.min(STRESS ? 1e5 : 9, num('horde', 0) | 0)), NLIGHTS = Math.max(0, num('lights', 0) | 0), NCONES = Math.max(0, num('cones', 0) | 0);
   const pool = Engine.itemPool(), cones = [];
   let blockers = null;
   function horde(t, set) {
     cones.length = 0;
-    if (NCONES && !blockers && num("coneshadows", 1)) blockers = statics[0].filter(function (it) { return !it.stack.def.ground && it.stack.n > 12; }).map(function (it) { return [it.x, it.y, it.stack.radius * it.scale * 0.45, it.z + it.stack.n * it.scale]; });
-    const W = Scene.WORLD.w - 40, rows = Math.max(1, Math.ceil(HORDE / 60)), lstep = Math.max(1, Math.floor(HORDE / Math.max(1, NLIGHTS))), cstep = Math.max(1, Math.floor(HORDE / Math.max(1, NCONES)));
+    if (NCONES && !blockers && num('coneshadows', 1)) blockers = statics[0].filter(function (it) { return !it.stack.def.ground && it.stack.n > 12; }).map(function (it) { return [it.x, it.y, it.stack.radius * it.scale * 0.45, it.z + it.stack.n * it.scale]; });
+    if (STRESS) {                                              // the bench's case: rows over the whole map, a light and a lamp spread through them
+      const W = Scene.WORLD.w - 40, rows = Math.max(1, Math.ceil(HORDE / 60)), lstep = Math.max(1, Math.floor(HORDE / Math.max(1, NLIGHTS))), cstep = Math.max(1, Math.floor(HORDE / Math.max(1, NCONES)));
+      for (let i = 0; i < HORDE; i++) {
+        const r = i % rows, k = (i / rows) | 0, dir = r & 1 ? -1 : 1, y = 24 + (r + 0.5) * (Scene.WORLD.h - 48) / rows;
+        const x = 20 + ((((k * W / 60 + dir * t * 9) % W) + W) % W), h = dir > 0 ? 0 : Math.PI, z = Scene.groundAt(x, y);
+        const it = pool.add(set.stacks[i % 3 ? 'jeep' : 'halftrack'], x, y, z, h);
+        it.fade = Math.max(0, 1 - Math.min(x - 20, W + 20 - x) / 12); it.lift = true;
+        if (i % lstep === 0 && i / lstep < NLIGHTS) lamps.push([x + dir * 6, y, z + 8, 42, 1.6, 1.05, 0.55, i < 8 * lstep ? 1 : 0, 0.6]);
+        if (i % cstep === 0 && i / cstep < NCONES) cones.push([x + dir * 4, y, z + 14, 150, dir, 0, -0.55, 0.42, 1.5, 1.4, 1.1, 1.2]);
+      }
+      return;
+    }
+    // THE CONVOY: nose to tail along the road (one lane: the road is one vehicle wide), a safe gap between them, at
+    // a walking pace; they come in and go out past the edges of the map, fading, and follow the road's bends
+    const span = Scene.WORLD.w + 120, gap = 66;
     for (let i = 0; i < HORDE; i++) {
-      const r = i % rows, k = (i / rows) | 0, dir = r & 1 ? -1 : 1, y = 24 + (r + 0.5) * (Scene.WORLD.h - 48) / rows;
-      const x = 20 + ((((k * W / 60 + dir * t * 9) % W) + W) % W), h = dir > 0 ? 0 : Math.PI, z = Scene.groundAt(x, y);
-      const it = pool.add(set.stacks[i % 3 ? 'jeep' : 'halftrack'], x, y, z + 0.3 * Math.abs(Math.sin(x * 0.33 + i)), h);
-      it.fade = Math.max(0, 1 - Math.min(x - 20, W + 20 - x) / 12); it.lift = true;      // they fade in and out where the columns wrap round
-      if (i % lstep === 0 && i / lstep < NLIGHTS) { const c = (i / lstep) % 3; lamps.push([x + dir * 6, y, z + 8, 42, c === 0 ? 2.6 : c === 1 ? 1.1 : 2.6, c === 0 ? 1.5 : c === 1 ? 1.5 : 0.45, c === 0 ? 0.5 : c === 1 ? 2.3 : 0.3, i < 8 * lstep ? 1 : 0, 0.8]); }
-      if (i % cstep === 0 && i / cstep < NCONES) cones.push([x + dir * 4, y, z + 14, 150, dir, 0, -0.55, 0.42, 1.5, 1.4, 1.1, 1.2]);      // a searchlight on its roof
+      const x = ((((i * gap + t * 11) % span) + span) % span) - 60, y = Scene.roadY(x), ang = Math.atan2(Scene.roadY(x + 1) - y, 1), z = Scene.groundAt(x, y);
+      const kind = i % 4 === 1 ? 'halftrack' : 'jeep', it = pool.add(set.stacks[kind], x, y, z, ang), e = Math.min(x, Scene.WORLD.w - x);
+      it.fade = Math.max(0, Math.min(1, -e / 30)); it.lift = true;
+      const c = Math.cos(ang), sn = Math.sin(ang), len = kind === 'jeep' ? 15 : 25;
+      // two lights each while they last: a warm lamp ahead, a dim red tail light behind
+      if (2 * i < NLIGHTS) lamps.push([x + c * (len + 4), y + sn * (len + 4), z + 5, 30, 1.25, 0.95, 0.6, i < 4 ? 1 : 0, 0.35]);
+      if (2 * i + 1 < NLIGHTS) lamps.push([x - c * (len + 2), y - sn * (len + 2), z + 4, 12, 0.9, 0.12, 0.08, 0, 0.5]);
+      if (i < Math.min(16, NCONES)) cones.push([x + c * len, y + sn * len, z + 6, 90, c, sn, -0.22, 0.34, 1.05, 0.98, 0.82, 0.35]);
     }
   }
-
   // ---------------------------------------------------------------- voxel mode: when
   // Flat slices stay solid while two things hold (both measured: see "Voxel mode" in the README).
   //  - The tilt is at least VOXEL_TILT. Below it a slice is nearly edge-on, and thin parts (a soldier's limbs, a
@@ -316,7 +363,7 @@
     // the jeep runs the road from one side of the map to the other, once every loop of the film, with dust behind it
     const J = Scene.JEEP, jeepAt = function (time) { const x = J.from + (((time + 17.8) % LOOP) + LOOP) % LOOP * J.speed, y = Scene.roadY(x); return x > J.to ? null : [x, y, Math.atan(9 * 0.012 * Math.cos(x * 0.012 + 1)), Scene.groundAt(x, y)]; };
     const j = jeepAt(t);
-    if (j) {
+    if (j && !HORDE) {                                       // (off while the ?horde convoy has the road)
       push('jeep', j[0], j[1], j[3] + 0.3 * Math.abs(Math.sin(j[0] * 0.33)), j[2]);
       for (let k = -1; k <= 1; k += 2) blobs.push([j[0] + Math.cos(j[2]) * 6 * k, j[1] + Math.sin(j[2]) * 6 * k, j[3] + 8, 6.5, j[3] - 1]);
     }
@@ -368,7 +415,7 @@
     const t = f / 60, set = SETS[S.shell ? 1 : 0], st = statics[S.shell ? 1 : 0];
     env = Scene.light(S.tod < 0 ? 0.5 - 0.5 * Math.cos(t * TAU / 80) : S.tod); env.cloud = 0.5 * (1 - env.glow);
     list.length = 0; blobs = []; lamps = [];
-    walkers.forEach(function (k) {
+    if (!HORDE || STRESS) walkers.forEach(function (k) {      // (the patrols keep off the road while the ?horde convoy is on it)
       const P = Rig.pose(k.rig), lift = Scene.groundAt(P.x * SCALE, P.y * SCALE); C.draw(Engine.figureWriter(list, SCALE, lift), set.chars.soldier, P);
       blobs.push([P.x * SCALE, P.y * SCALE, lift + C.height * SCALE, 3, lift - 1]);
     });
@@ -379,7 +426,7 @@
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
     const RO = { cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
-      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings };      // ?hdr=1: the half-float picture (see the README)
+      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings, lightMapScale: env.glow };      // ?hdr=1: the half-float picture (see the README)
     E.render(UNIT !== 1 ? inUnits(RO, UNIT) : RO);
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);

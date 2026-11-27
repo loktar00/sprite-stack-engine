@@ -550,11 +550,14 @@ ground cell. Everything below comes from those.
 
 ## Lights and hordes
 
-![A column of 240 vehicles at dusk: 96 point lights and 16 searchlights](media/hordes.png)
+![A convoy on the road at dusk: headlamps, tail lights and street lamps from a light map](media/hordes.png)
 
 For games with many lights and many moving things: a swarm, a convoy, a night defence. All of it is off unless
-asked for, and the village looks and runs as before. In the demo, **?horde=2000&lights=256&cones=16&tod=1**
-puts it all on (vehicles in columns crossing the map, each light and searchlight riding on one of them).
+asked for, and the village looks and runs as before. In the demo, **?horde=9&lights=18&cones=9&lightmap=1&tod=1**
+sends a convoy down the road at dusk: headlamps (cone lights), lamps and tail lights (point lights), and the
+street lamps on the road's poles from a light map. `?bots=400&rows=1` puts flocks of birds over the fields,
+from typed arrays, with a flash running through them (a palette row). The thousands-strong cases in the tables
+below are behind `?stress=1`; they are for measuring and are not meant to be looked at.
 
 **Point lights.** `opt.lamps` takes up to 256: `[x, y, z, reach, r, g, b, occlude, halo]`. The first seven
 are as before; the last two are optional.
@@ -605,7 +608,7 @@ E.render({ ..., list: list, horde: [bots] });
 ```
 
 The engine walks the arrays inside its own build loop: each unit is culled and written to the instance buffer
-like an item, with nothing allocated. 6000 three-layer birds (`?bots=6000` in the demo) cost the engine 0.39 ms
+like an item, with nothing allocated. 6000 three-layer birds (the `--hordes` bench) cost the engine 0.39 ms
 more a frame on the machine of the table below, about 0.065 ms per thousand; the same through item
 objects costs about the same, so the typed path is mainly about the game not having to keep objects at all.
 
@@ -630,7 +633,7 @@ An item's `row`, or a horde's `row` array, picks the row it is drawn in: a hit f
 building under construction, all from the same stack in the atlas. The row rides in the instance (in the
 fraction of its atlas line), and while the palette has more than one row the slice pass writes it to a third,
 one-byte target that the light pass reads. With one row nothing changes and nothing extra is drawn. In the
-demo, `?bots=3000&rows=1` draws every other bird in a second, red-hot row.
+demo, `?bots=400&rows=1` sends a white flash out through each flock every few seconds.
 
 Animation is a choice of stack: build one stack per frame of a walk or a flap, and pick the frame from each
 thing's phase. A moving horde then costs no more than a standing one. What it does cost is the slices: every
@@ -661,19 +664,21 @@ horde into a coarse height map every frame and have thousands of units throw sha
 takes its colour from this, one RGBA texel per cell: palette index A, palette index B, and how far A has worn
 towards B (0 to 255). A flat world then costs no instances at all, and tracks, scorch marks and craters are
 texel writes: `E.patchGroundMap(bytes, x, y, w, h)`. `setGroundMap(null)` switches it off. `?groundmap=1` in
-the demo paints the country round the map with it.
+the demo paints the country round the map with it, in the village's colours: the road carried on past the edges
+as worn ruts, fields, and a few old shell scorches (the map itself is drawn by its tiles).
 
 **The light map.** `E.setLightMap(bytes, w, h, box, scale)`: light that does not move (lamp masts, lit windows,
 a glowing pool) painted into a world-space RGB texture and added to every pixel over it, read smoothed, 255
-worth `scale`. Any number of static lights for one texture read; `E.patchLightMap` changes part of it.
-`?lightmap=1` in the demo (best with `&tod=1`).
+worth `scale`. Any number of static lights for one texture read; `E.patchLightMap` changes part of it, and
+`opt.lightMapScale` sets its strength for a frame (the demo turns its street lamps up as dusk falls).
+`?lightmap=1&tod=1` in the demo: warm pools under the poles along the road.
 
 **Ring lights.** `opt.rings` takes up to 8: `[x, y, z, radius, width, r, g, b, glow, lift]`, a band of light
 round a centre, for a pulse that grows outward. Whatever stands in the band and near its height is lit, faces
 turned towards the band most; `glow` makes the band shine by itself, so it reads on black ground; `lift` raises
 items with `lift: true` and horde groups with `lift: true` as the band passes under them (a bump that rides the
 band). Compiled in only while there are rings. Lifting 6000 units under 8 rings costs about 0.15 ms of engine
-CPU. `?rings=6&bots=3000&tod=1` in the demo.
+CPU. `?rings=6&bots=400&tod=1` in the demo.
 
 ![Six pulse rings at dusk](media/rings.png)
 
