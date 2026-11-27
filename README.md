@@ -796,6 +796,31 @@ the light pass. In the demo: `?ss=2`, `?shadowq=2`, `?reach=1.5`, `?soft=1.3`, `
 demo does not cap the resolution). Any canvas size works, 1440p and 4K included; the demo keeps native under
 about 2.6 million pixels unless told otherwise, the engine itself does not.
 
+### Self-shading
+
+The light pass shades a model by its facing and by walks over the height map, so a model's own small shapes (a
+turret over its hull, a barrel, eaves over a wall, a leg under a body) barely shade it. Baked self-shading adds
+that, from the model's own voxels, once, when its stack is built:
+
+- **occlusion**: how much of the space round each voxel is solid, at two radii: recesses, undersides and joints darken;
+- **shadow**: for 8 directions round the model at one elevation, whether the model's own voxels stand between
+  the voxel and the light (nearer blockers darker). The engine reads the two directions either side of the
+  real key light (the sun, or the moon at night), turned with the model, and mixes them.
+
+`new Art.Atlas(size, { self: true, elevation })` bakes both for every stack built into it (not ground tiles, or a
+model with `noSelf`) into two more textures laid out like the atlas; give them to the engine with
+`opt.self = { atlas: [E.makeAtlas(atlas.self0, size), E.makeAtlas(atlas.self1, size)], occlusion, shadow }`
+(strengths, 1 if not given). It works for flat slices, voxel mode, impostors, horde frames and both light
+models; the shaders that read it are their own builds (`E.warm({ self: true, ... })`).
+
+Cost: the bake added about 0.3 s to the demo's load (every model, twice: whole and shell). At run time it is one
+more texture write in the slice pass and one read in the light pass: on the default views 1 to 5 % (most of
+that noise), more at 1440p night, where the third G-buffer target costs most. `?selfshade=1` in the demo.
+
+| | Without | With |
+| --- | --- | --- |
+| A tank's turret and barrel over its hull | ![](media/self-tank-off.png) | ![](media/self-tank-on.png) |
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.

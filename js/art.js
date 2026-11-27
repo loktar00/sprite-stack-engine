@@ -103,13 +103,68 @@
   }
 
   // The atlas: every slice of every stack in one RGBA texture (index, normal x, normal y, normal z), packed in rows.
-  function Atlas(size) { this.size = size; this.data = new Uint8Array(size * size * 4); this.x = 1; this.y = 1; this.rowH = 0; this.used = 0; }
-  Atlas.prototype.put = function (px, srcW, x0, y0, w, h) {
+  // opts.self (optional): also two more textures of the same layout with each pixel's baked self-shading (see
+  // bakeSelf): self0 R its own occlusion, self1 its shadow from 8 directions round it, 4 bits each. They start
+  // full (255: no occlusion, no shadow), so stacks that are not baked are not darkened.
+  function Atlas(size, opts) {
+    this.size = size; this.data = new Uint8Array(size * size * 4); this.x = 1; this.y = 1; this.rowH = 0; this.used = 0;
+    this.self0 = opts && opts.self ? new Uint8Array(size * size * 4).fill(255) : null; this.self1 = this.self0 ? new Uint8Array(size * size * 4).fill(255) : null;
+    this.selfElevation = opts && opts.elevation !== undefined ? opts.elevation : 0.7; this.bakeMs = 0;
+  }
+  Atlas.prototype.put = function (px, srcW, x0, y0, w, h, s0, s1) {
     if (this.x + w + 1 > this.size) { this.x = 1; this.y += this.rowH + 1; this.rowH = 0; }
     if (this.y + h + 1 > this.size) throw new Error('atlas full');
     for (let y = 0; y < h; y++) this.data.set(px.subarray(((y0 + y) * srcW + x0) * 4, ((y0 + y) * srcW + x0 + w) * 4), ((this.y + y) * this.size + this.x) * 4);
+    if (s0 && this.self0) for (let y = 0; y < h; y++) {
+      const a = ((y0 + y) * srcW + x0) * 4, b = ((this.y + y) * this.size + this.x) * 4;
+      this.self0.set(s0.subarray(a, a + w * 4), b); this.self1.set(s1.subarray(a, a + w * 4), b);
+    }
     const at = [this.x, this.y]; this.x += w + 1; if (h > this.rowH) this.rowH = h; this.used += w * h; return at;
   };
+
+  // SELF-SHADING, baked once per model from its own voxels (only when the atlas asks for it):
+  //   occlusion  how much of the space round each voxel is solid, at two radii (2 and 4 voxels): a recess, the
+  //              underside of an eave, the joint of a leg and a body are darker; a flat face is 1. Below the box
+  //              counts as solid (the ground).
+  //   shadow     for 8 directions round the model at one elevation (the scene's key light), whether a ray from
+  //              the voxel towards the light meets the model's own voxels, and how near: the engine reads the two
+  //              directions either side of the real light and mixes them
+  // Returns, per voxel of the box, its occlusion (a byte) and its 8 shadows (4 bits each, in 4 bytes).
+  function bakeSelf(def, vox, el) {
+    if (def.selfBake && def.selfBake.el === el) return def.selfBake;
+    const pad = def.pad || 0, w = def.w + pad * 2, h = def.h + pad * 2, n = def.layers, wh = w * h, N = wh * n;
+    const solid = function (x, y, z) { return z < 0 ? 1 : x < 0 || y < 0 || z >= n || x >= w || y >= h ? 0 : vox[(z * h + y) * w + x] ? 1 : 0; };
+    // box sums of the occupancy, radius r, by three passes along x, y and z (the ground below z = 0 counts)
+    const box = function (r) {
+      const a = new Float32Array(N), b = new Float32Array(N);
+      for (let z = 0; z < n; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let c = 0; for (let d = -r; d <= r; d++) c += solid(x + d, y, z); a[(z * h + y) * w + x] = c; }
+      for (let z = 0; z < n; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let c = 0; for (let d = -r; d <= r; d++) { const yy = y + d; c += yy < 0 || yy >= h ? 0 : a[(z * h + yy) * w + x]; } b[(z * h + y) * w + x] = c; }
+      for (let z = 0; z < n; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let c = 0; for (let d = -r; d <= r; d++) { const zz = z + d; c += zz < 0 ? (2 * r + 1) * (2 * r + 1) : zz >= n ? 0 : b[(zz * h + y) * w + x]; } a[(z * h + y) * w + x] = c / Math.pow(2 * r + 1, 3); }
+      return a;
+    };
+    const b2 = box(2), b4 = box(4), ao = new Uint8Array(N), sh = new Uint8Array(N * 4);
+    const ce = Math.cos(el), se = Math.sin(el), DX = [], DY = [];
+    for (let k = 0; k < 8; k++) { DX.push(Math.cos(k * Math.PI / 4) * ce); DY.push(Math.sin(k * Math.PI / 4) * ce); }
+    const S = 40;      // the furthest a ray looks, in voxels
+    for (let z = 0; z < n; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (z * h + y) * w + x; if (!vox[i]) continue;
+      // a voxel with no empty neighbour is never seen
+      if (solid(x + 1, y, z) && solid(x - 1, y, z) && solid(x, y + 1, z) && solid(x, y - 1, z) && solid(x, y, z + 1) && (z === 0 || solid(x, y, z - 1))) continue;
+      const a2 = Math.max(0, Math.min(1, 1 - (b2[i] - 0.48) * 2.4)), a4 = Math.max(0, Math.min(1, 1 - (b4[i] - 0.46) * 2.0));
+      ao[i] = Math.round(Math.max(0.15, a2 * 0.6 + a4 * 0.4) * 255);
+      for (let k = 0; k < 8; k++) {
+        // march from the voxel's centre, starting a voxel and a half out so its own neighbours do not shade it
+        let lit = 15; const dx = DX[k], dy = DY[k];
+        for (let t = 1.5; t < S; t += 0.75) {
+          const xx = Math.floor(x + 0.5 + dx * t), yy = Math.floor(y + 0.5 + dy * t), zz = Math.floor(z + 0.5 + se * t);
+          if (zz >= n || xx < 0 || yy < 0 || xx >= w || yy >= h) break;
+          if (vox[(zz * h + yy) * w + xx]) { lit = Math.round(15 * 0.6 * Math.min(1, t / S)); break; }      // nearer: darker
+        }
+        const j = i * 4 + (k >> 1); sh[j] = k & 1 ? (sh[j] & 0xF0) | lit : (sh[j] & 0x0F) | (lit << 4);
+      }
+    }
+    return (def.selfBake = { el: el, ao: ao, sh: sh });
+  }
 
   // A stack ready to draw: for each kept layer its place in the atlas and its offset from the stack's axis.
   // Slices are put in the atlas tallest first within a stack only by chance; the packing is plain rows.
@@ -117,6 +172,9 @@
   // across and upward; the engine draws it that much smaller (k, kz), so a detailed close-up model fits the scene.
   function buildStack(def, pal, atlas, shell) {
     const v = voxelise(def, pal, shell), pad = def.pad || 0;
+    // the baked self-shading, laid out like each layer's pixels (when the atlas asks for it, and the model allows it)
+    let bake = null; const t0 = Date.now();
+    if (atlas.self0 && !def.noSelf && !def.ground) bake = bakeSelf(def, v.vox, atlas.selfElevation);
     const st = { name: def.name, def: def, k: 1 / (def.res || 1), kz: (def.res || 1) / (def.zres || def.res || 1), shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], runs: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1 };
     // two layers are the same when they are cropped alike and every pixel (material and normal) matches
     const same = function (A, B) {
@@ -147,7 +205,17 @@
     let prev = null;
     for (let z = 0; z < def.layers; z++) {
       const L = v.layers[z]; if (!L) { prev = null; continue; }
-      const at = atlas.put(L.px, def.w, L.x0, L.y0, L.w, L.h);
+      let s0 = null, s1 = null;
+      if (bake) {
+        s0 = new Uint8Array(def.w * def.h * 4).fill(255); s1 = new Uint8Array(def.w * def.h * 4).fill(255);
+        const W = def.w + pad * 2, H = def.h + pad * 2;
+        for (let y = L.y0; y < L.y0 + L.h; y++) for (let x = L.x0; x < L.x0 + L.w; x++) {
+          const j = (y * def.w + x) * 4; if (!L.px[j]) continue;
+          const i = (z * H + y + pad) * W + x + pad; if (!bake.ao[i]) continue;      // (0: a voxel that is never seen)
+          s0[j] = bake.ao[i]; s1[j] = bake.sh[i * 4]; s1[j + 1] = bake.sh[i * 4 + 1]; s1[j + 2] = bake.sh[i * 4 + 2]; s1[j + 3] = bake.sh[i * 4 + 3];
+        }
+      }
+      const at = atlas.put(L.px, def.w, L.x0, L.y0, L.w, L.h, s0, s1);
       // u, v, w, h in the atlas; ox, oy: the centre of the cropped slice, measured from the axis.
       // sides: false when no pixel of the layer lies on its outline. That only happens in a ground tile (the
       // neighbouring tiles continue it): such a layer has a top but no side, and the engine draws it once.
@@ -159,6 +227,7 @@
       if (prev && run.n < 3 && L.sides && same(L, prev)) run.n++; else { const r = { z: z, n: 1, u: sl.u, v: sl.v, w: sl.w, h: sl.h, ox: sl.ox, oy: sl.oy, sides: sl.sides, parts: sl.parts }; r.whole = [r]; st.runs.push(r); }
       prev = L;
     }
+    if (bake) atlas.bakeMs += Date.now() - t0;
     return st;
   }
 
@@ -170,5 +239,5 @@
     return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
   }
 
-  global.Art = { Palette: Palette, Atlas: Atlas, buildStack: buildStack, hash: hash, noise: noise };
+  global.Art = { Palette: Palette, Atlas: Atlas, buildStack: buildStack, bakeSelf: bakeSelf, hash: hash, noise: noise };
 })(typeof window !== 'undefined' ? window : globalThis);

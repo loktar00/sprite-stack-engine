@@ -92,13 +92,31 @@
   // hit flash, burning, a ghost) without another copy of the stack in the atlas. An instance's row rides in its
   // rectangle (see VS_SLICE); while there is more than one row the slice pass writes it to a third target, which
   // the light pass reads. With one row none of this is compiled in (ROWS_ON 0).
+  // SELF-SHADING (opt.self): the model's own occlusion and its shadow from the key light, baked into two more atlas
+  // textures (art.js, bakeSelf), read here at the same texel and turned with the slice, and written beside the row.
   const ROWS_OUT = `
   #define ROWS_ON 0
-  #if ROWS_ON
+  #define SELF_ON 0
+  #if ROWS_ON || SELF_ON
   layout(location=2) out vec4 o2;
-  #define ROW_WRITE(r) o2 = vec4((r) / 255.0, 0.0, 0.0, 1.0)
+  #endif
+  #if SELF_ON
+  uniform sampler2D u_self0, u_self1; uniform vec3 u_key;
+  float nib(vec4 d, int i) { float b = d[i >> 1]; return (i & 1) == 0 ? floor(b / 16.0) : mod(b, 16.0); }
+  // occlusion, and the shadow from the key: the two baked directions either side of it, in the slice's own frame
+  vec2 selfAt(ivec2 tc, vec2 cs) {
+    float ao = texelFetch(u_self0, tc, 0).r; vec4 d = floor(texelFetch(u_self1, tc, 0) * 255.0 + 0.5);
+    vec2 k = vec2(u_key.x * cs.x + u_key.y * cs.y, -u_key.x * cs.y + u_key.y * cs.x);
+    float f = mod((atan(k.y, k.x + 1e-6) / 6.2831853 + 1.0) * 8.0, 8.0), i0 = floor(f);
+    int a = int(i0) & 7, b = (a + 1) & 7;
+    float sh = mix(nib(d, a), nib(d, b), f - i0) / 15.0;
+    return vec2(ao, mix(1.0, sh, smoothstep(0.98, 0.6, u_key.z)));      // a light from straight above casts no side shadow
+  }
+  #define G2_WRITE(r, tc, cs) { vec2 sa = selfAt(tc, cs); o2 = vec4((r) / 255.0, sa.x, sa.y, 1.0); }
+  #elif ROWS_ON
+  #define G2_WRITE(r, tc, cs) o2 = vec4((r) / 255.0, 1.0, 1.0, 1.0)
   #else
-  #define ROW_WRITE(r)
+  #define G2_WRITE(r, tc, cs)
   #endif`;
   const FADED = `
   bool faded(float f) {
@@ -116,13 +134,14 @@
   ${FADED}
   void main() {
     if (faded(v_fade)) discard;
-    vec4 t = texelFetch(u_atlas, ivec2(clamp(v_uv, v_rect.xy, v_rect.xy + v_rect.zw - 0.001)), 0);
+    ivec2 tc = ivec2(clamp(v_uv, v_rect.xy, v_rect.xy + v_rect.zw - 0.001));
+    vec4 t = texelFetch(u_atlas, tc, 0);
     if (t.r == 0.0) discard;                                // an empty pixel of the slice
     vec3 n = t.gba * 2.0 - 1.0; n.xy = vec2(n.x * v_cs.x - n.y * v_cs.y, n.x * v_cs.y + n.y * v_cs.x);   // turn the facing with the slice
     o0 = vec4(t.r, n * 0.5 + 0.5);                          // palette index, facing
     float h = clamp(v_h / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
     o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 0.0);   // height, 16 bits (the other two are voxel mode's)
-    ROW_WRITE(v_row);
+    G2_WRITE(v_row, tc, v_cs);
   }`;
   const FS_COUNT = `#version 300 es
   precision highp float;
@@ -169,6 +188,7 @@
   const WALK = `
   uniform sampler2D u_atlas; uniform mat4 u_vp;
   in vec3 v_p, v_d; flat in vec4 v_rect, v_base; flat in vec3 v_how;
+  ivec2 hitCell = ivec2(0);      // the atlas texel the walk hit (for the self-shading)
   // Step the ray through the slice's texels (the classic grid walk). t: the texel hit. q: where, in texels.
   bool walk(out vec4 t, out vec3 q) {
     vec3 dir = v_d / max(length(v_d), 1e-6); vec2 size = v_rect.zw;
@@ -180,7 +200,7 @@
     float leave = dir.z < -0.00001 ? p.z / -dir.z : dir.z > 0.00001 ? (v_how.z - p.z) / dir.z : 1000000.0, k = 0.0; bool hit = false;
     for (int i = 0; i < 48; i++) {
       t = texelFetch(u_atlas, ivec2(v_rect.xy) + cell, 0);
-      if (t.r > 0.0) { hit = true; break; }
+      if (t.r > 0.0) { hit = true; hitCell = ivec2(v_rect.xy) + cell; break; }
       if (next.x < next.y) { k = next.x; next.x += inv.x; cell.x += stp.x; } else { k = next.y; next.y += inv.y; cell.y += stp.y; }
       if (k > leave || cell.x < 0 || cell.y < 0 || cell.x >= lim.x || cell.y >= lim.y) break;
     }
@@ -213,7 +233,7 @@
     vec2 l = (v_off + q.xy - v_rect.zw * 0.5) * v_base.w;
     float far = clamp(dot(vec3(v_base.xy + vec2(l.x * v_how.x - l.y * v_how.y, l.x * v_how.y + l.y * v_how.x), hw) - u_eye, u_fwd) / 4096.0, 0.0, 1.0) * 65535.0, fi = floor(far / 256.0);
     o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, fi / 255.0, (far - fi * 256.0) / 255.0);
-    ROW_WRITE(v_row);
+    G2_WRITE(v_row, hitCell, v_how.xy);
   }`;
   const FS_COUNTVOXEL = `#version 300 es
   precision highp float;
@@ -269,7 +289,7 @@
     o0 = vec4(a.r, n * 0.5 + 0.5);
     float h = clamp(hw / ${HMAX}.0, 0.0, 1.0) * 65535.0, hi = floor(h / 256.0);
     o1 = vec4(hi / 255.0, (h - hi * 256.0) / 255.0, 0.0, 1.0);
-    ROW_WRITE(0.0);
+    G2_WRITE(0.0, ivec2(0), vec2(1.0, 0.0));
   }`;
   const FS_COUNTIMP = `#version 300 es
   precision highp float;
@@ -298,7 +318,9 @@
   #define RINGS_ON 0
   #define TWO_ON 0
   #define FILM_ON 0
+  #define SELF_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  uniform vec2 u_self;        // the self-shading's strength: occlusion, shadow
   uniform float u_falloff;    // 0: the lamps fall off as (1 - r / reach)^2; 1: windowed and steep near the source (opt.falloff)
   uniform vec4 u_qual;        // opt.quality: steps of a lamp's occlusion test, beam steps, the shadow walk's step scale, occlusion radius scale
   #if RINGS_ON
@@ -310,8 +332,8 @@
   #if LIGHTMAP_ON
   uniform sampler2D u_lm; uniform vec4 u_lmBox; uniform float u_lmK;     // the light map, where it lies, what 1.0 in it is worth
   #endif
-  #if ROWS_ON
-  uniform sampler2D u_g2;     // the palette row of each pixel
+  #if ROWS_ON || SELF_ON
+  uniform sampler2D u_g2;     // the palette row of each pixel, its own occlusion, its own shadow
   #endif
   uniform highp sampler2D u_lt;  // the lights' table (float): a column per light, rows 0-2 point lights from the ninth on, rows 3-6 cones
   uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];   // the first eight point lights, as uniforms: the common case reads no texture
@@ -511,6 +533,9 @@
       if (n.z < 0.6) ao *= mix(0.68, 1.0, smoothstep(0.0, 7.0 * U, p.z - land(p.xy + n.xy * (4.5 * U))));
       ao = mix(1.0, max(ao, 0.25), u_fx.y);
     }
+#if SELF_ON
+    if (!outer) { vec4 sv = texelFetch(u_g2, px, 0); ao *= mix(1.0, sv.g, u_self.x); sh *= mix(1.0, sv.b, u_self.y); }
+#endif
 
     // The fill: instead of one flat ambient colour, cool light from the sky on what faces up and warm light
     // bounced off the earth on what faces down, blended by the facing (hemisphere lighting).
@@ -645,11 +670,13 @@
   #define RINGS_ON 0
   #define TWO_ON 0
   #define FLOOR_ON 0
+  #define SELF_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  uniform vec2 u_self;
   uniform highp sampler2D u_lt;
   uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];
   uniform int u_nl, u_ns; uniform float u_lampCap, u_falloff;
-  #if ROWS_ON
+  #if ROWS_ON || SELF_ON
   uniform sampler2D u_g2;
   #endif
   #if GROUND_ON
@@ -828,6 +855,9 @@
       vec2 over = hm(p.xy); float canopy = over.y > p.z + KM ? 0.35 : 0.0;
       ao = clamp(1.0 - occ / u_qual2.y - canopy, 0.25, 1.0);
     }
+  #if SELF_ON
+    if (!ground) { vec4 sv = texelFetch(u_g2, px, 0); ao *= mix(1.0, sv.g, u_self.x); sh *= mix(1.0, sv.b, u_self.y); }
+  #endif
     // contact shadows under figures the height map does not hold
     for (int i = 0; i < ${CONTACTS}; i++) {
       if (i >= u_ncontact) break;
@@ -1092,15 +1122,21 @@
       if (!variants[key]) { let src = fs; on.forEach(function (d) { src = src.split('#define ' + d + ' 0').join('#define ' + d + ' 1'); }); variants[key] = program(vs, src); }
       return variants[key];
     }
+    // the slice pass for palette rows and self-shading: voxel, flat or impostor
+    function gProgram(kind, rows, self) {
+      const on = (rows ? ['ROWS_ON'] : []).concat(self ? ['SELF_ON'] : []);
+      if (!on.length) return kind === 'v' ? pGVoxel : kind === 'i' ? pGImp : pG;
+      return variant('g' + kind + on.join(), kind === 'v' ? VS_VOXEL : kind === 'i' ? VS_IMP : VS_SLICE, kind === 'v' ? FS_GVOXEL : kind === 'i' ? FS_GIMP : FS_G, on);
+    }
     // the light pass for a set of features
-    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : []);
+    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film, self) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : [], self ? ['SELF_ON'] : []);
       return on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight;
     }
     // the night model for a set of features, and a game's floor (GLSL source, or none)
     const floors = [];
-    function nightProgram(cones, rows, ground, lightMap, rings, two, floor) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : []);
+    function nightProgram(cones, rows, ground, lightMap, rings, two, floor, self) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : [], self ? ['SELF_ON'] : []);
       let fi = floor ? floors.indexOf(floor) : -1; if (floor && fi < 0) { floors.push(floor); fi = floors.length - 1; }
       return variant('n' + on.join() + '|' + fi, VS_FULL, floor ? FS_NIGHT.replace('FLOOR_SOURCE', floor) : FS_NIGHT, on);
     }
@@ -1148,7 +1184,7 @@
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
       // the same with the palette row as a third target, for a palette with more than one row
-      g2 = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE); fboGR = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboGR);
+      g2 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); fboGR = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboGR);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, g2, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
       fboLit = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lit, 0);
@@ -1181,9 +1217,9 @@
       if (!warmFbo) { warmFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), 0); gl.bindTexture(gl.TEXTURE_2D, null); }      // (unbound, or the programs would sample their own target)
       const night = !!f.night && floatOK, film = (night || !!f.post) && floatOK, hdr = (!!f.hdr || film) && floatOK, progs = [];
       [false, !!f.cones].forEach(function (c, i) { if (i && !c) return; [false, !!f.rings].forEach(function (r, j) { if (j && !r) return;
-        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film)); }); });
+        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null, !!f.self) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film, !!f.self)); }); });
       if (film) progs.push(variant('knee', VS_FULL, FS_KNEE, []), variant('down', VS_FULL, FS_DOWN, []), variant('film', VS_FULL, FS_FILM, []));
-      if (f.rows) progs.push(variant('gr', VS_SLICE, FS_G, ['ROWS_ON']), variant('gvr', VS_VOXEL, FS_GVOXEL, ['ROWS_ON']), variant('gir', VS_IMP, FS_GIMP, ['ROWS_ON']));
+      if (f.rows || f.self) progs.push(gProgram('f', !!f.rows, !!f.self), gProgram('v', !!f.rows, !!f.self), gProgram('i', !!f.rows, !!f.self));
       if (hdr && !film) progs.push(variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']), variant('ph', VS_FULL, FS_POST, ['HDR_ON']));
       gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.viewport(0, 0, 1, 1); gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.bindVertexArray(vaoFull);
       progs.forEach(function (p) { gl.useProgram(p.p); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
@@ -1376,6 +1412,12 @@
     function drawSlices(prog, n, M, opt, hsr) {
       gl.useProgram(prog.p); gl.uniformMatrix4fv(prog.u.u_vp, false, M.vp);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, opt.atlas); gl.uniform1i(prog.u.u_atlas, 0);
+      if (prog.u.u_self0 && opt.self) {      // the baked self-shading, and the key light it is read for (the sun, or at night the moon)
+        const L = opt.light || {}, k = L.model === 'night' ? L.moon : L.sun, kl = k ? Math.hypot(k[0], k[1], k[2]) || 1 : 1;
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, opt.self.atlas[0]); gl.uniform1i(prog.u.u_self0, 1);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, opt.self.atlas[1]); gl.uniform1i(prog.u.u_self1, 2);
+        gl.uniform3f(prog.u.u_key, k ? k[0] / kl : 0, k ? k[1] / kl : 0, k ? k[2] / kl : 1); gl.activeTexture(gl.TEXTURE0);
+      }
       if (hsr) { gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); } else gl.disable(gl.DEPTH_TEST);
       if (opt.voxel) {                                         // VOXEL MODE: boxes, 36 corners each, back faces culled
         gl.bindVertexArray(vaoVoxel); gl.uniform3fv(prog.u.u_eye, M.eye); gl.uniform3fv(prog.u.u_fwd, M.f); gl.uniform1f(prog.u.u_ortho, M.ortho ? 1 : 0);
@@ -1449,6 +1491,8 @@
     //        coneTable (instead of coneBlockers: the shadow tables themselves, ${BINS} x 16 RGBA bytes: per bin the
     //        distance to the first blocker over the cone's range in 16 bits, its height over ${HMAX} in 8),
     //        falloff ('window' for the steep windowed lamp falloff), contacts [[x, y, radius, strength]] (night),
+    //        self ({ atlas: [self0, self1] (E.makeAtlas of an Art.Atlas's self0 and self1), occlusion, shadow (strengths, 1) }:
+    //        the models' baked self-shading),
     //        post ({ dof: [focus, depth, row, strength], grade: [contrast, black, saturation, shadow blue], grain,
     //        vignette, exposure, bloom, knee }: the film post, on the half-float picture),
     //        lightMapScale (the light map's strength this frame: 1 if not given, 0 by day),
@@ -1473,12 +1517,12 @@
       gl.viewport(0, 0, iw, ih); gl.disable(gl.BLEND);
 
       // the slice pass: G-buffer only
-      const rowsOn = palRows > 1;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, rowsOn ? fboGR : fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      const pg = rowsOn ? (opt.voxel ? variant('gvr', VS_VOXEL, FS_GVOXEL, ['ROWS_ON']) : variant('gr', VS_SLICE, FS_G, ['ROWS_ON'])) : opt.voxel ? pGVoxel : pG, pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
+      const rowsOn = palRows > 1, SF = opt.self && opt.self.atlas ? opt.self : null;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rowsOn || SF ? fboGR : fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      const pg = gProgram(opt.voxel ? 'v' : 'f', rowsOn, !!SF), pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
       const sprites = opt.impostors && opt.impostors.length ? opt.impostors : null;
       drawSlices(pg, n, M, opt, tested);
-      if (sprites) E.stats.instances += drawImpostors(rowsOn ? variant('gir', VS_IMP, FS_GIMP, ['ROWS_ON']) : pGImp, sprites, M, opt, true);
+      if (sprites) E.stats.instances += drawImpostors(gProgram('i', rowsOn, !!SF), sprites, M, opt, true);
 
       // the count pass: the same draw again, adding 1 per fragment. Red: fragments written. Green: fragments the quads cover.
       if (opt.measure || opt.heat) {
@@ -1504,10 +1548,11 @@
       // the night model and the film post both need the half-float picture
       const night = env.model === 'night', film = !!(opt.post || night) && floatOK;
       const HD = (opt.hdr || night || opt.post) && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
-      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film), u = pl.u, sun = env.sun;
+      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null, !!SF) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film, !!SF), u = pl.u, sun = env.sun;
       gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
-      if (rowsOn) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
+      if (rowsOn || SF) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
+      if (SF) gl.uniform2f(u.u_self, SF.occlusion !== undefined ? SF.occlusion : 1, SF.shadow !== undefined ? SF.shadow : 1);
       if (nr) {
         // rings: [x, y, z, radius, width, r, g, b, glow, lift]
         const rp = new Float32Array(RINGS * 4), rc = new Float32Array(RINGS * 4), rg = new Float32Array(RINGS);

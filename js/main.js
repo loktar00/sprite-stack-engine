@@ -20,11 +20,14 @@
 
   // ---------------------------------------------------------------- art: every stack twice, whole and as a shell
   const pal = Scene.palette(), DEFS = Scene.stacks(), SETS = [];
+  // ?selfshade=1: every model also bakes its own occlusion and shadow (art.js, bakeSelf), drawn with opt.self
+  const SELF = Q.has('selfshade');
   [0, 3].forEach(function (shell) {                            // 0: whole stacks. 3: only the pixels within 3 of the surface
-    const atlas = new Art.Atlas(2048), stacks = {}, chars = {};
+    const atlas = new Art.Atlas(2048, SELF ? { self: true, elevation: 0.6 } : null), stacks = {}, chars = {};
     DEFS.forEach(function (d) { stacks[d.name] = Art.buildStack(d, pal, atlas, shell); });
     Object.keys(Characters).forEach(function (c) { chars[c] = {}; Characters[c].parts.forEach(function (d) { chars[c][d.name] = Art.buildStack(d, pal, atlas, shell); }); });
-    SETS.push({ stacks: stacks, chars: chars, atlas: E.makeAtlas(atlas.data, atlas.size), pixels: atlas.used });
+    SETS.push({ stacks: stacks, chars: chars, atlas: E.makeAtlas(atlas.data, atlas.size), pixels: atlas.used,
+      self: SELF ? [E.makeAtlas(atlas.self0, atlas.size), E.makeAtlas(atlas.self1, atlas.size)] : null, bakeMs: atlas.bakeMs });
   });
   // ?rows=1: a second palette row, every colour washed most of the way to white and shining a little: the flash
   // that runs through the ?bots flocks
@@ -44,7 +47,7 @@
     earthCol: [0.035, 0.032, 0.03], fogCol: [0.032, 0.052, 0.088], fog: [0.0025, 0.03, 0.08], emissive: 3.5, fogNear: 120, rim: 0.9, rimWarm: 0.05, floorCol: [0.07, 0.065, 0.05] };
   // the optional builds of the shaders this page will use, made now rather than on the first frame that needs each
   // (?nowarm=1 leaves them to be made when first needed, to measure the hitch that saves)
-  if (!Q.has('nowarm')) E.warm({ night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
+  if (!Q.has('nowarm')) E.warm({ self: SELF, night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
   // ?groundmap=1: the country round the map from a ground map (a 4-unit cell, two palette indices and a wear): the
   // road carried on past both edges as worn ruts, fields of pasture and plough, and a few old shell scorches,
   // in the village's own colours. The map itself is drawn by its tiles; the ground map shows past its edge.
@@ -440,7 +443,7 @@
     const RO = { cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
       cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings, lightMapScale: env.glow };      // ?hdr=1: the half-float picture (see the README)
-    RO.quality = QUALITY;
+    RO.quality = QUALITY; if (SELF) RO.self = { atlas: set.self, occlusion: 1, shadow: 1 };
     if (NIGHT) {      // ?night=1: the night model and the film post (see the README); the lanterns are lit, the soldiers get contact shadows
       RO.light = NIGHT_LIGHT; RO.lampCap = 0.55; RO.post = { bloom: 0.4, vignette: 0.42, grain: 0.012, exposure: 1.8, grade: [0.26, 0.012, 1.16, 1], knee: 1.6, dof: [cam.mode === 'persp' ? cam.dist : 600, cam.mode === 'persp' ? cam.dist * 0.6 : 400, 0.5, 0.35] };
       RO.contacts = walkers.slice(0, 8).map(function (k) { const P = Rig.pose(k.rig); return [P.x * SCALE, P.y * SCALE, 4.5, 0.5]; });
