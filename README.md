@@ -645,6 +645,44 @@ fs)` compiles one) and `M.vp`; they are hidden behind what stands in front of th
 colour, and its alpha is how much each pixel blooms, so a particle that writes alpha glows. The engine puts its
 own state back afterwards.
 
+**World units.** The light pass was written with one world unit to an art pixel: the shadow walk's steps, the
+occlusion radii, the rim, the edge of the map, the camera's near plane. `opt.unit` (1 if not given) is the size
+of an art pixel in world units, and all of those scale with it, so a game in metres (`unit: 0.1`, items at
+`scale: 0.1`) lights like the village. In the demo, `?unit=0.1` draws the village with every length times 0.1:
+it looks the same (a pixel here and there differs by rounding). `Engine.cameraMatrices(cam, aspect, unit)`
+takes the same unit.
+
+**The height map's own box.** `E.setHeightMap(bytes, w, h, box, step)`: `box` is where it lies,
+`[x0, y0, width, depth]` (a cell per unit at the origin if not given), and `step` the world height of one step
+of a byte (0.5 if not given). A map of the same size as the last goes up in place, so a game can splat its
+horde into a coarse height map every frame and have thousands of units throw shadows for one upload.
+
+**The ground map.** `E.setGroundMap(bytes, w, h, box)`: open ground (wherever no slice was drawn) inside `box`
+takes its colour from this, one RGBA texel per cell: palette index A, palette index B, and how far A has worn
+towards B (0 to 255). A flat world then costs no instances at all, and tracks, scorch marks and craters are
+texel writes: `E.patchGroundMap(bytes, x, y, w, h)`. `setGroundMap(null)` switches it off. `?groundmap=1` in
+the demo paints the country round the map with it.
+
+**The light map.** `E.setLightMap(bytes, w, h, box, scale)`: light that does not move (lamp masts, lit windows,
+a glowing pool) painted into a world-space RGB texture and added to every pixel over it, read smoothed, 255
+worth `scale`. Any number of static lights for one texture read; `E.patchLightMap` changes part of it.
+`?lightmap=1` in the demo (best with `&tod=1`).
+
+**A hard sun, and haze by height.** `light.soft` sets the sun's shadow softness directly (near 0: the hard
+edge of a sun with no air; by default it follows the sun's height). `light.hazeH = [density, falloff]` adds
+haze that is thick at the ground and thins upward, integrated along each view ray; `hazeK: 0` turns the
+distance haze off.
+
+**HDR.** `opt.hdr`: the light pass writes linear light to a half-float picture (where the GPU can render to
+one), the fx hook can add light above 1, bloom takes what glows and what is brighter than `light.knee` (1 if
+not given), and the tone curve and grade run after the bloom. What bloom and the post pass read is scrubbed
+first (clamped, any NaN or infinity made 0), so one bad pixel cannot spread through the blur. By day it looks
+like the default; at night bright lights and beams bloom. `?hdr=1` in the demo.
+
+Cone lights, palette rows, the ground map, the light map and HDR are each compiled into their own build of
+the shaders, made the first time they are used; the default build only gained the multiplications by the unit
+and the height-haze test. The village draws the same, pixel for pixel, and its frame times are within noise.
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.

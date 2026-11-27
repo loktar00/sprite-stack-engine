@@ -29,6 +29,24 @@
   // ?rows=1: a second palette row (every colour pushed to a hot red-white, a hit flash) that half the ?bots birds use
   if (Q.has('rows')) { const b = pal.bytes(), two = new Uint8Array(b.length * 2); two.set(b); for (let i = 0; i < 256; i++) { const o = b.length + i * 4; two[o] = 255; two[o + 1] = Math.min(255, 90 + b[i * 4 + 1]); two[o + 2] = Math.min(255, 60 + b[i * 4 + 2] * 0.5); two[o + 3] = 255; } E.setPalette(two, 2); }
   else E.setPalette(pal.bytes());
+  // ?unit=0.1: the same scene in other world units (every position, size and the camera times 0.1, opt.unit 0.1):
+  // a test that the light pass is free of art-pixel numbers. It should look the same.
+  const UNIT = Q.has('unit') ? parseFloat(Q.get('unit')) || 1 : 1;
+  // ?groundmap=1: the open ground round the map from a ground map (two palette indices and a wear per 4-unit cell),
+  // with a ring of worn track patched in; ?lightmap=1: warm and cold pools of light from a light map
+  if (Q.has('groundmap')) {
+    const gw = 384, gh = 288, g = new Uint8Array(gw * gh * 4), A = pal.names.grass2, B = pal.names.dirt;
+    for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) { const o = (y * gw + x) * 4; g[o] = A; g[o + 1] = B; g[o + 2] = Math.round(255 * Math.max(0, Math.min(1, Art.noise(x / 9, y / 9, 3) * 1.6 - 0.45))); g[o + 3] = 255; }
+    E.setGroundMap(g, gw, gh, [-512 * UNIT, -384 * UNIT, 1536 * UNIT, 1152 * UNIT]);
+    const r = 16, patch = new Uint8Array((2 * r + 1) * (2 * r + 1) * 4);
+    for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) { const o = ((y + r) * (2 * r + 1) + x + r) * 4, d = Math.abs(Math.hypot(x, y) - 12); patch[o] = A; patch[o + 1] = B; patch[o + 2] = d < 1.5 ? 255 : 0; patch[o + 3] = 255; }
+    E.patchGroundMap(patch, 96 - r, 150 - r, 2 * r + 1, 2 * r + 1);
+  }
+  if (Q.has('lightmap')) {
+    const lw = 128, lh = 96, l = new Uint8Array(lw * lh * 4), spots = [[200, 190, 30, 1, 0.6, 0.25], [330, 120, 26, 0.3, 0.6, 1], [120, 260, 34, 1, 0.35, 0.15]];
+    for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) { const o = (y * lw + x) * 4; let c = [0, 0, 0]; spots.forEach(function (S) { const k = Math.max(0, 1 - Math.hypot(x * 4 - S[0], y * 4 - S[1]) / S[2]); c = c.map(function (v, i) { return v + S[3 + i] * k * k; }); }); l[o] = Math.min(255, c[0] * 255); l[o + 1] = Math.min(255, c[1] * 255); l[o + 2] = Math.min(255, c[2] * 255); l[o + 3] = 255; }
+    E.setLightMap(l, lw, lh, [0, 0, 512 * UNIT, 384 * UNIT], 1.5);
+  }
 
   const LAYOUT = Scene.layout();
   const statics = SETS.map(function (S) { return LAYOUT.map(function (l) { return { stack: S.stacks[l.n], x: l.x, y: l.y, z: l.z, rot: l.rot, scale: l.scale, only: -1, sway: l.sway, shx: 0, shy: 0 }; }); });
@@ -82,7 +100,7 @@
       E.patchHeightMap(part, d.x0, d.y0, w, h);
     }
     hm.set(base); DYN.forEach(function (d) { stamp(d, 999, false); });
-    E.setHeightMap(hm, W, H);
+    E.setHeightMap(hm, W, H, UNIT !== 1 ? [0, 0, W * UNIT, H * UNIT] : null, UNIT !== 1 ? 0.5 * UNIT : null);
     return { stamp: stamp };
   })();
 
@@ -317,6 +335,21 @@
     if (env.glow > 0.02) Scene.LAMPS.forEach(function (L, i) { const k = env.glow * 1.5 * (0.94 + 0.06 * Math.sin(t * 9 + i * 2)); lamps.push([L[0], L[1], L[2], L[3], 1.0 * k, 0.72 * k, 0.4 * k]); });
   }
 
+  // the same frame in other units (?unit): every length times u, and opt.unit u
+  function inUnits(o, u) {
+    const r = Object.assign({}, o), sc = function (a, n) { return a.map(function (v, i) { return i < n ? v * u : v; }); };
+    r.cam = Object.assign({}, o.cam, { tx: o.cam.tx * u, ty: o.cam.ty * u, tz: (o.cam.tz || 0) * u, dist: o.cam.dist * u });
+    r.list = o.list.map(function (it) {
+      const c = Object.assign({}, it, { x: it.x * u, y: it.y * u, z: it.z * u, scale: it.scale * u });
+      if (it.each) c.each = function (z, n, out) { const m = it.each(z, n, out); if (!m) return null; m.dx *= u; m.dy *= u; m.dz *= u; return m; };
+      if (it.reach) c.reach = it.reach * u;
+      return c;
+    });
+    r.lamps = o.lamps.map(function (l) { return sc(l, 4); }); r.blobs = o.blobs.map(function (b) { return sc(b, 5); });
+    r.cones = o.cones.map(function (c) { const k = sc(c, 4); return k; }); r.coneBlockers = o.coneBlockers && o.coneBlockers.map(function (b) { return sc(b, 4); });
+    r.ground = (o.ground || 0) * u; r.unit = u; r.impostors = null; r.horde = null;
+    return r;
+  }
   function draw(f, measure) {
     frame = f; simTo(f); if (TOURING) tour(f); else if (S.orbit) cam.yaw = v0.yaw + f / 60 * 0.06;
     if (walkers[FOLLOW]) { const q = walkers[FOLLOW].path.at(walkers[FOLLOW].s); cam.tx = q[0]; cam.ty = q[1]; cam.tz = Scene.groundAt(q[0], q[1]) + 8; if (Q.has('face')) cam.yaw = q[2] + Math.PI + num('face', 0); }      // ?follow=3&face=0: keep a soldier in view, from the front
@@ -333,9 +366,10 @@
     const baked = S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
     sprites.length = 0; sheet = baked;
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
-    E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
+    const RO = { cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
-      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null });
+      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr') };      // ?hdr=1: the half-float picture (see the README)
+    E.render(UNIT !== 1 ? inUnits(RO, UNIT) : RO);
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);
   }

@@ -48,16 +48,18 @@
   // The camera orbits a point on the ground. yaw turns it, pitch tilts it (90 degrees is straight down), dist zooms.
   // mode 'ortho' is the classic parallel view; 'persp' is a true perspective camera.
   // Sorting by height is exact as long as every view ray points downward, which holds while pitch > fov / 2.
-  function cameraMatrices(cam, aspect) {
+  // unit (optional, 1 if not given): the size of an art pixel in world units, which sets the near and far planes.
+  function cameraMatrices(cam, aspect, unit) {
+    const U = unit || 1;
     const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch), cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
     const f = [cp * cy, cp * sy, -sp], r = [sy, -cy, 0], u = [cy * sp, sy * sp, cp];
-    const ortho = cam.mode !== 'persp', th = Math.tan(cam.fov / 2), back = ortho ? 1500 : cam.dist;
+    const ortho = cam.mode !== 'persp', th = Math.tan(cam.fov / 2), back = ortho ? 1500 * U : cam.dist;
     const eye = [cam.tx - f[0] * back, cam.ty - f[1] * back, (cam.tz || 0) - f[2] * back];      // tz: the height of the point looked at (the ground, unless set)
     const dot = function (a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
     const V = new Float32Array([r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, eye), -dot(u, eye), dot(f, eye), 1]);
     let P;
-    if (ortho) { const hh = cam.dist * th, hw = hh * aspect, n = 1, fr = 3200; P = new Float32Array([1 / hw, 0, 0, 0, 0, 1 / hh, 0, 0, 0, 0, -2 / (fr - n), 0, 0, 0, -(fr + n) / (fr - n), 1]); }
-    else { const n = Math.max(2, cam.dist * 0.05), fr = cam.dist * 3 + 1400; P = new Float32Array([1 / (th * aspect), 0, 0, 0, 0, 1 / th, 0, 0, 0, 0, -(fr + n) / (fr - n), -1, 0, 0, -2 * fr * n / (fr - n), 0]); }
+    if (ortho) { const hh = cam.dist * th, hw = hh * aspect, n = U, fr = 3200 * U; P = new Float32Array([1 / hw, 0, 0, 0, 0, 1 / hh, 0, 0, 0, 0, -2 / (fr - n), 0, 0, 0, -(fr + n) / (fr - n), 1]); }
+    else { const n = Math.max(2 * U, cam.dist * 0.05), fr = cam.dist * 3 + 1400 * U; P = new Float32Array([1 / (th * aspect), 0, 0, 0, 0, 1 / th, 0, 0, 0, 0, -(fr + n) / (fr - n), -1, 0, 0, -2 * fr * n / (fr - n), 0]); }
     const vp = mul(P, V);
     return { vp: vp, inv: invert(vp), eye: eye, f: f, r: r, u: u, ortho: ortho, th: th, cp: cp, px: P[0], py: P[5], back: back };
   }
@@ -289,7 +291,16 @@
   precision highp float;
   #define CONES_ON 0
   #define ROWS_ON 0
+  #define GROUND_ON 0
+  #define LIGHTMAP_ON 0
+  #define HDR_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  #if GROUND_ON
+  uniform sampler2D u_gm; uniform vec4 u_gmBox;     // the ground map, and where it lies: x0, y0, width, depth
+  #endif
+  #if LIGHTMAP_ON
+  uniform sampler2D u_lm; uniform vec4 u_lmBox; uniform float u_lmK;     // the light map, where it lies, what 1.0 in it is worth
+  #endif
   #if ROWS_ON
   uniform sampler2D u_g2;     // the palette row of each pixel
   #endif
@@ -297,7 +308,12 @@
   uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];   // the first eight point lights, as uniforms: the common case reads no texture
   uniform mat4 u_inv;
   uniform vec3 u_sun, u_sunCol, u_skyCol, u_bounceCol, u_hazeCol, u_outer, u_eye, u_fwd;
-  uniform vec4 u_world;       // the map's width and depth, the level of open ground, the time in seconds
+  uniform vec4 u_world;       // (unused xy), the level of open ground, the time in seconds
+  uniform vec4 u_hmBox;       // the height map's place: x0, y0, width, depth; the edge of the map is its edge too
+  uniform vec3 u_hmK;         // world height per step of a height map byte, the highest it can hold less a margin, U
+  uniform vec4 u_hh;          // height haze: its density at the ground (per unit of distance), how fast it thins upward (0: off)
+  // U (u_hmK.z) is the size of one art pixel in world units (opt.unit, 1 if not given): every distance written as
+  // a number below is in art pixels and is multiplied by it, so a world in metres lights like one in art pixels.
   uniform vec4 u_fx;          // shadow softness (0: no shadows), occlusion strength, how far the lamps are lit, cloud shadows
   uniform vec4 u_view;        // the direction to the sun on screen (xy, pixels), where the haze starts, how deep it is
   uniform vec4 u_tone;        // exposure, haze strength, 1 for the perspective camera
@@ -309,7 +325,7 @@
   uniform vec4 u_blob[${BLOBS}]; uniform float u_blobLow[${BLOBS}]; uniform int u_nblob;
   in vec2 v_uv; out vec4 o;
 
-  float land(vec2 p) { return textureLod(u_hm, p / u_world.xy, 0.0).r * 127.5; }            // smoothed between cells
+  float land(vec2 p) { return textureLod(u_hm, (p - u_hmBox.xy) / u_hmBox.zw, 0.0).r * u_hmK.x; }      // smoothed between cells
   float height(ivec2 px) { vec4 g = texelFetch(u_g1, clamp(px, ivec2(0), textureSize(u_g1, 0) - 1), 0); return (g.r * 65280.0 + g.g * 255.0) / 65535.0 * ${HMAX}.0; }
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }
@@ -325,6 +341,9 @@
   // Tone curve and grade. The curve leaves dark and middle tones alone and rolls bright ones off towards white
   // instead of clipping them. The grade adds a little saturation, warms the highlights and cools the shadows.
   vec3 finish(vec3 c) {
+#if HDR_ON
+    return max(c, vec3(0.0));                               // HDR: linear light, the curve is applied after bloom (FS_POST)
+#endif
     c = 1.0 - exp(-pow(max(c * u_tone.x, 0.0), vec3(1.25)) * 1.7);
     float l = dot(c, vec3(0.299, 0.587, 0.114));
     c = mix(vec3(l), c, 1.16);
@@ -370,8 +389,8 @@
     if (r < L.w) {
       float att = 1.0 - r / L.w, occ = 1.0;
       if (C.w > 0.5) {
-        vec3 q = p + vec3(n.xy * 3.5, 1.3), e = L.xyz - q;   // start off the surface, as the sun's walk does
-        for (int k = 1; k < 8; k++) { vec3 s = q + e * (float(k) / 8.0); occ = min(occ, clamp((s.z - land(s.xy)) * 0.5 + 0.5, 0.0, 1.0)); }
+        vec3 q = p + vec3(n.xy * (3.5 * u_hmK.z), 1.3 * u_hmK.z), e = L.xyz - q;   // start off the surface, as the sun's walk does
+        for (int k = 1; k < 8; k++) { vec3 s = q + e * (float(k) / 8.0); occ = min(occ, clamp((s.z - land(s.xy)) * 0.5 / u_hmK.z + 0.5, 0.0, 1.0)); }
       }
       irr += C.rgb * att * att * occ * (0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0));
     }
@@ -394,11 +413,11 @@
     // the camera for that case (perspective only: the parallel camera's rays all slope alike).
     vec3 ray = normalize(b.xyz - a.xyz); vec4 g1 = texelFetch(u_g1, px, 0);
     if (!outer && u_tone.z > 0.5 && abs(ray.z) < 0.06 && g1.b + g1.a > 0.0) p = u_eye + ray * ((g1.b * 65280.0 + g1.a * 255.0) / 65535.0 * 4096.0 / dot(ray, u_fwd));
-    float t = u_world.w;
+    float t = u_world.w, U = u_hmK.z;
 
     // The edge of the map dissolves into haze: no hard border, and things driving off it fade out.
-    vec2 over = max(-p.xy, p.xy - u_world.xy);
-    float fade = smoothstep(-24.0, 92.0, length(max(over, 0.0)) + min(max(over.x, over.y), 0.0) + (vnoise(p.xy * 0.012) - 0.5) * 30.0);
+    vec2 over = max(u_hmBox.xy - p.xy, p.xy - (u_hmBox.xy + u_hmBox.zw));
+    float fade = smoothstep(-24.0 * U, 92.0 * U, length(max(over, 0.0)) + min(max(over.x, over.y), 0.0) + (vnoise(p.xy / U * 0.012) - 0.5) * (30.0 * U));
     if (fade > 0.995) { o = vec4(finish(u_hazeCol), 0.0); return; }
 
 #if ROWS_ON
@@ -406,12 +425,24 @@
 #else
     vec4 pal = texelFetch(u_pal, ivec2(int(g0.r * 255.0 + 0.5), 0), 0);
 #endif
-    vec3 alb = outer ? mix(beyond(p.xy), u_outer, smoothstep(0.1, 0.5, fade)) : pal.rgb;      // the made-up fields lose their detail first
+    vec3 alb = outer ? mix(beyond(p.xy / U), u_outer, smoothstep(0.1, 0.5, fade)) : pal.rgb;      // the made-up fields lose their detail first
     vec3 n = outer ? vec3(0.0, 0.0, 1.0) : normalize(g0.gba * 2.0 - 1.0);
     float glow = outer ? 0.0 : pal.a;
+#if GROUND_ON
+    // THE GROUND MAP: open ground inside its box takes its colour from it, a texel per cell: two palette indices
+    // and how far the first has worn towards the second (tracks, scorch, glassed slag are texel writes).
+    if (outer) {
+      vec2 gu = (p.xy - u_gmBox.xy) / u_gmBox.zw;
+      if (gu.x >= 0.0 && gu.y >= 0.0 && gu.x < 1.0 && gu.y < 1.0) {
+        ivec2 gs = textureSize(u_gm, 0); vec4 gm = texelFetch(u_gm, clamp(ivec2(gu * vec2(gs)), ivec2(0), gs - 1), 0);
+        vec4 ga = texelFetch(u_pal, ivec2(int(gm.r * 255.0 + 0.5), 0), 0), gb = texelFetch(u_pal, ivec2(int(gm.g * 255.0 + 0.5), 0), 0), gc = mix(ga, gb, gm.b);
+        alb = gc.rgb; glow = gc.a;
+      }
+    }
+#endif
     bool wet = !outer && abs(g0.r * 255.0 - u_water) < 1.5;
     if (wet) {                                              // water: ripples that drift, one art pixel each
-      vec2 q = floor(p.xy);
+      vec2 q = floor(p.xy / U);
       n = normalize(vec3(vnoise(q * 0.45 + vec2(t * 0.7, t * 1.1)) - 0.5, vnoise(q * 0.8 - vec2(t * 0.9, t * 0.4)) - 0.5, 1.6));
     }
 
@@ -421,16 +452,16 @@
     // and soft at their tips. The walk ends after ${REACH} units; shadows fade out there instead of stopping dead.
     float sh = 1.0;
     if (u_fx.x > 0.0) {
-      vec3 q = p + vec3(n.xy * 3.5, 1.3);                   // start off the surface (and clear of the eaves)
+      vec3 q = p + vec3(n.xy * (3.5 * U), 1.3 * U);           // start off the surface (and clear of the eaves)
       // (every art pixel takes steps of a slightly different length, which turns the banding of a coarse walk into
       // a fine dither that stays put on the ground)
-      float d = 0.0, ds = 1.3, jit = 0.78 + 0.44 * hash(floor(p.xy) + floor(p.z) * 7.31);
+      float d = 0.0, ds = 1.3 * U, jit = 0.78 + 0.44 * hash(floor(p.xy / U) + floor(p.z / U) * 7.31);
       for (int i = 0; i < ${STEPS}; i++) {
         if (float(i) >= u_walk.x) break;
         d += ds * jit; ds = min(ds * u_walk.y, u_walk.z);
         vec3 s = q + u_sun * d;
         sh = min(sh, mix(clamp((s.z - land(s.xy)) / (u_fx.x * d), 0.0, 1.0), 1.0, smoothstep(u_walk.w * 0.7, u_walk.w, d)));
-        if (sh <= 0.0 || s.z > 125.0) break;
+        if (sh <= 0.0 || s.z > u_hmK.y) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
       // Moving things are not in the height map. Each is an upright cylinder (soldiers, the jeep) or a blob in
@@ -440,11 +471,11 @@
         vec4 B = u_blob[i]; vec2 dd = B.xy - p.xy; float k = dot(dd, u_sun.xy) / dot(u_sun.xy, u_sun.xy);
         if (k > 0.5) {
           float z = p.z + u_sun.z * k, r = length(dd - u_sun.xy * k);
-          sh *= 1.0 - 0.72 * smoothstep(B.w * 1.2, B.w * 0.5, r) * smoothstep(u_blobLow[i] - 1.5, u_blobLow[i] + 0.5, z) * (1.0 - smoothstep(B.z - 0.5, B.z + 1.5, z));
+          sh *= 1.0 - 0.72 * smoothstep(B.w * 1.2, B.w * 0.5, r) * smoothstep(u_blobLow[i] - 1.5 * U, u_blobLow[i] + 0.5 * U, z) * (1.0 - smoothstep(B.z - 0.5 * U, B.z + 1.5 * U, z));
         }
       }
       // cloud shadows: two layers of slow noise sliding over the land
-      float cl = vnoise(p.xy * 0.0058 + t * vec2(0.045, 0.028)) * 0.65 + vnoise(p.xy * 0.017 - t * vec2(0.02, 0.05)) * 0.35;
+      vec2 pu = p.xy / U; float cl = vnoise(pu * 0.0058 + t * vec2(0.045, 0.028)) * 0.65 + vnoise(pu * 0.017 - t * vec2(0.02, 0.05)) * 0.35;
       sh *= 1.0 - u_fx.w * smoothstep(0.5, 0.78, cl);
     }
 
@@ -453,15 +484,15 @@
     // the sky. Walls are sampled out in front of themselves, and darken a little towards their foot (contact).
     float ao = 1.0;
     if (u_fx.y > 0.0) {
-      vec2 c0 = p.xy + n.xy * 3.0; float occ = 0.0;
+      vec2 c0 = p.xy + n.xy * (3.0 * U); float occ = 0.0;
       for (int i = 0; i < 8; i++) {
         if (float(i) >= u_dirs) break;
         float an = float(i) * 6.2832 / u_dirs + 0.4; vec2 dir = vec2(cos(an), sin(an));
-        if (u_dirs > 4.5) occ += clamp((land(c0 + dir * 2.5) - p.z - 1.0) / 2.5, 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * 7.5) - p.z - 1.0) / 7.5, 0.0, 1.0) * 0.45;
-        else occ += clamp((land(c0 + dir * 4.5) - p.z - 1.0) / 4.5, 0.0, 1.0);
+        if (u_dirs > 4.5) occ += clamp((land(c0 + dir * (2.5 * U)) - p.z - U) / (2.5 * U), 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * (7.5 * U)) - p.z - U) / (7.5 * U), 0.0, 1.0) * 0.45;
+        else occ += clamp((land(c0 + dir * (4.5 * U)) - p.z - U) / (4.5 * U), 0.0, 1.0);
       }
       ao = 1.0 - occ / u_dirs;
-      if (n.z < 0.6) ao *= mix(0.68, 1.0, smoothstep(0.0, 7.0, p.z - land(p.xy + n.xy * 4.5)));
+      if (n.z < 0.6) ao *= mix(0.68, 1.0, smoothstep(0.0, 7.0 * U, p.z - land(p.xy + n.xy * (4.5 * U))));
       ao = mix(1.0, max(ao, 0.25), u_fx.y);
     }
 
@@ -477,7 +508,7 @@
     // Rim: where the next pixel towards the sun is much lower, this pixel is a sunward edge, and catches light.
     if (!outer) {
       float drop = h - height(px + ivec2(floor(u_view.xy + 0.5)));
-      light += u_sunCol * smoothstep(3.0, 9.0, drop) * 0.3 * (0.25 + 0.75 * sh);
+      light += u_sunCol * smoothstep(3.0 * U, 9.0 * U, drop) * 0.3 * (0.25 + 0.75 * sh);
     }
     vec3 col = alb * light;
     if (wet) {                                              // water also mirrors the sky and glints
@@ -518,6 +549,12 @@
       }
     }
 #endif
+#if LIGHTMAP_ON
+    // THE LIGHT MAP: light that does not move (lamp masts, windows, a glowing pool) painted once into a world-space
+    // texture, any number of lights for one read
+    vec2 lu = (p.xy - u_lmBox.xy) / u_lmBox.zw;
+    if (lu.x >= 0.0 && lu.y >= 0.0 && lu.x <= 1.0 && lu.y <= 1.0) irr += textureLod(u_lm, lu, 0.0).rgb * u_lmK;
+#endif
     if (u_lampCap > 0.0) irr = irr / (1.0 + max(irr.r, max(irr.g, irr.b)) * u_lampCap);
     col += alb * irr;
     // Pixels that shine. A glow of 1 in the palette always shines (fire). A smaller glow is a lamp or a window:
@@ -528,6 +565,12 @@
     // Haze: things further into the picture take on the colour of the air.
     float hz = clamp((dot(p - u_eye, u_fwd) - u_view.z) / u_view.w, 0.0, 1.0);
     col = mix(col, u_hazeCol, hz * hz * u_tone.y * (1.0 - e));
+    // Height haze (off unless asked for): dense at the ground, thinning upward, integrated exactly along the view ray
+    if (u_hh.x > 0.0) {
+      float dz = u_eye.z - p.z, k = max(u_hh.y, 1e-4), ze = max(u_eye.z, 0.0), zp = max(p.z, 0.0);
+      float od = abs(dz) > 0.01 ? u_hh.x * dist * (exp(-zp * k) - exp(-ze * k)) / (dz * k) : u_hh.x * dist * exp(-zp * k);
+      col = mix(col, u_hazeCol, (1.0 - exp(-max(od, 0.0))) * (1.0 - e * 0.6));
+    }
     col = mix(col, u_hazeCol, fade);
     // the lights' halos and the beams are in the air in front of the surface: after the haze, each rolled off so a
     // beam seen down its length cannot white the frame out
@@ -551,12 +594,29 @@
   // Bloom, in three small shaders. Bright: keep only what glows (colour times the alpha the light pass wrote),
   // shrunk to a quarter. Blur: nine taps along one axis, run across then down, twice. Post: add the blur back
   // over the sharp picture ("screen", so it cannot go past white) and darken the corners a little (vignette).
+  // HDR (opt.hdr): the light pass writes linear light to a half-float picture, the fx hook can add more than 1,
+  // and the tone curve and grade move to the post pass. A NaN or an infinity from any pass would spread through
+  // every blur after it, so what the bloom and the post pass read is scrubbed first: clamped, and anything that is
+  // not a number becomes 0. Bloom then takes what glows and what is brighter than a knee.
+  const SCRUB = `
+  vec3 scrub(vec3 c) {
+    c = clamp(c, vec3(0.0), vec3(48.0));
+    if (isnan(c.r) || isnan(c.g) || isnan(c.b) || isinf(c.r) || isinf(c.g) || isinf(c.b)) c = vec3(0.0);
+    return c;
+  }`;
   const FS_BRIGHT = `#version 300 es
   precision highp float;
-  uniform sampler2D u_tex; uniform vec2 u_px; in vec2 v_uv; out vec4 o;
+  #define HDR_ON 0
+  uniform sampler2D u_tex; uniform vec2 u_px; uniform float u_knee; in vec2 v_uv; out vec4 o;
+  ${SCRUB}
+#if HDR_ON
+  vec3 pick(vec4 t) { vec3 c = scrub(t.rgb); return c * max(clamp(t.a, 0.0, 1.0), smoothstep(u_knee, u_knee + 0.8, max(c.r, max(c.g, c.b)))); }
+#else
+  vec3 pick(vec4 t) { return t.rgb * t.a; }
+#endif
   void main() {
-    vec4 a = texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_px), b = texture(u_tex, v_uv + vec2(1.0, -1.0) * u_px), c = texture(u_tex, v_uv + vec2(-1.0, 1.0) * u_px), d = texture(u_tex, v_uv + vec2(1.0, 1.0) * u_px);
-    o = vec4((a.rgb * a.a + b.rgb * b.a + c.rgb * c.a + d.rgb * d.a) * 0.25, 1.0);
+    vec3 s = pick(texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_px)) + pick(texture(u_tex, v_uv + vec2(1.0, -1.0) * u_px)) + pick(texture(u_tex, v_uv + vec2(-1.0, 1.0) * u_px)) + pick(texture(u_tex, v_uv + vec2(1.0, 1.0) * u_px));
+    o = vec4(min(s * 0.25, vec3(24.0)), 1.0);
   }`;
   const FS_BLUR = `#version 300 es
   precision highp float;
@@ -571,12 +631,24 @@
   }`;
   const FS_POST = `#version 300 es
   precision highp float;
+  #define HDR_ON 0
   uniform sampler2D u_tex, u_bloom; uniform vec2 u_size; uniform vec2 u_k;      // u_k: bloom strength, vignette strength
+  uniform float u_exp;        // HDR: the exposure (the light pass's tone curve and grade, applied here instead)
   in vec2 v_uv; out vec4 o;
+  ${SCRUB}
   void main() {
+#if HDR_ON
+    vec3 c = scrub(texelFetch(u_tex, ivec2(min(v_uv * u_size, u_size - 1.0)), 0).rgb) + scrub(texture(u_bloom, v_uv).rgb) * u_k.x;
+    c = 1.0 - exp(-pow(max(c * u_exp, 0.0), vec3(1.25)) * 1.7);
+    float l = dot(c, vec3(0.299, 0.587, 0.114));
+    c = mix(vec3(l), c, 1.16);
+    c += vec3(0.022, 0.006, -0.022) * smoothstep(0.4, 1.0, l) + vec3(-0.014, 0.0, 0.022) * (1.0 - smoothstep(0.0, 0.45, l));
+    c = clamp(c, 0.0, 1.0);
+#else
     vec3 c = texelFetch(u_tex, ivec2(min(v_uv * u_size, u_size - 1.0)), 0).rgb;  // the nearest internal pixel: no smoothing
     vec3 b = min(texture(u_bloom, v_uv).rgb * u_k.x, 1.0);
     c = 1.0 - (1.0 - c) * (1.0 - b);
+#endif
     vec2 d = v_uv - 0.5; c *= 1.0 - u_k.y * dot(d, d) * 1.6;
     o = vec4(c, 1.0);
   }`;
@@ -640,9 +712,17 @@
     const vaoFull = gl.createVertexArray(); gl.bindVertexArray(vaoFull); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
 
     // render targets, made again when the internal resolution changes
-    let iw = 0, ih = 0, bw = 0, bh = 0, g0, g1, g2, lit, countTex, depth, fboG, fboGR, fboLit, fboCount, bloom = [], fboBloom = [];
+    let iw = 0, ih = 0, bw = 0, bh = 0, g0, g1, g2, lit, countTex, depth, fboG, fboGR, fboLit, fboCount, bloom = [], fboBloom = [], hdr = null;
+    // the half-float picture and bloom for opt.hdr, made the first time they are asked for at this size
+    function hdrTargets() {
+      if (hdr) return hdr;
+      const t = { lit: texture(iw, ih, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR), fbo: gl.createFramebuffer(), bloom: [], fboBloom: [] };
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.lit, 0); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+      for (let i = 0; i < 2; i++) { t.bloom[i] = texture(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR); t.fboBloom[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, t.fboBloom[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.bloom[i], 0); }
+      return (hdr = t);
+    }
     function targets(w, h) {
-      if (w === iw && h === ih) return; iw = w; ih = h; bw = Math.max(1, w >> 2); bh = Math.max(1, h >> 2);
+      if (w === iw && h === ih) return; iw = w; ih = h; bw = Math.max(1, w >> 2); bh = Math.max(1, h >> 2); hdr = null;
       g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
       countTex = floatOK ? texture(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT) : texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
       depth = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, depth); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
@@ -661,7 +741,8 @@
     }
 
     const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
-    let palTex = null, hmTex = null, world = [1, 1], query = null, timing = false;
+    let palTex = null, hmTex = null, hmBox = [0, 0, 1, 1], hmStep = 0.5, query = null, timing = false;
+    let gmTex = null, gmBox = null, lmTex = null, lmBox = null, lmK = 1;
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
 
     E.makeAtlas = function (data, size) { return texture(size, size, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, data); };
@@ -670,7 +751,23 @@
     E.setPalette = function (bytes, rows) { palRows = Math.max(1, Math.min(64, rows || 1)); palTex = texture(256, palRows, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
     // the height map for shadows and occlusion: one byte per ground cell, the height of the tallest thing standing
     // on it (in half units). It is read with smoothing, which is what rounds the shadows' edges.
-    E.setHeightMap = function (bytes, w, h) { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); world = [w, h]; };
+    // box (optional): where it lies in the world, [x0, y0, width, depth] (0, 0, w, h if not given: a cell per unit);
+    // step (optional): the world height of one step of a byte (0.5 if not given). The edge of the height map is the
+    // edge of the map. A map of the same size as the last goes up in place, so sending a whole map every frame (a
+    // horde splatted into it, to throw shadows) costs one upload.
+    E.setHeightMap = function (bytes, w, h, box, step) {
+      if (hmTex && E.hmW === w && E.hmH === h) { gl.bindTexture(gl.TEXTURE_2D, hmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RED, gl.UNSIGNED_BYTE, bytes); }
+      else { hmTex = texture(w, h, gl.R8, gl.RED, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); E.hmW = w; E.hmH = h; }
+      hmBox = box ? box.slice(0, 4) : [0, 0, w, h]; hmStep = step || 0.5;
+    };
+    // THE GROUND MAP (optional): open ground (where no slice was drawn) inside `box` takes its colour from this, a
+    // texel per cell, RGBA: palette index A, palette index B, wear (0 all A, 255 all B), unused. null switches it off.
+    E.setGroundMap = function (bytes, w, h, box) { if (!bytes) { gmTex = null; return; } gmTex = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); gmBox = box.slice(0, 4); };
+    E.patchGroundMap = function (bytes, x, y, w, h) { gl.bindTexture(gl.TEXTURE_2D, gmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
+    // THE LIGHT MAP (optional): light that does not move, RGBA (rgb used), read smoothed over `box`; 255 is worth
+    // `scale` (1 if not given). It lights slices and ground alike. null switches it off.
+    E.setLightMap = function (bytes, w, h, box, scale) { if (!bytes) { lmTex = null; return; } lmTex = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); lmBox = box.slice(0, 4); lmK = scale || 1; };
+    E.patchLightMap = function (bytes, x, y, w, h) { gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
     // a part of it again, when something on the map changes height (a wall lowered, a roof blown off)
     E.patchHeightMap = function (bytes, x, y, w, h) { gl.bindTexture(gl.TEXTURE_2D, hmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RED, gl.UNSIGNED_BYTE, bytes); };
 
@@ -733,7 +830,7 @@
     const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
     const NOHORDE = [], unit = { stack: null, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1, shx: 0, shy: 0, zs: 1, fade: 0, row: 0, each: null, reach: 0 };
     function build(list, M, opt) {
-      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel;
+      const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel, U = opt.unit || 1, zq = ZQ / U;      // zq: height buckets per world unit
       let n = 0, slices = 0, tallest = 0;
       // A shell stack is hollow, so a shallow view ray must not slip between two copies of a slice and through the
       // shell: the copies have to be closer together than the shell is deep along that ray.
@@ -755,7 +852,7 @@
         // sc, zs: the item's scale and how much taller each layer is drawn (zs, optional), with the stack's own sampling (art.js: res, zres)
         const st = it.stack, sc = it.scale * (st.k || 1), one = it.only >= 0, zs = (it.zs || 1) * (st.kz || 1), zk = (st.k || 1) * (st.kz || 1);
         // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
-        const zc = one ? it.z : it.z + st.n * sc * zs * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * zs * 0.5)) * sc + (it.each ? it.reach || 60 : 2);      // reach: how far an effect can move slices
+        const zc = one ? it.z : it.z + st.n * sc * zs * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * zs * 0.5)) * sc + (it.each ? it.reach || 60 * U : 2 * U);      // reach: how far an effect can move slices
         const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15], cx = vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12], cy = vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13];
         if (!M.ortho && cw < -R) continue;                     // behind the camera
         if ((M.ortho || cw > R) && (Math.abs(cx) - R * M.px > cw || Math.abs(cy) - R * M.py > cw)) continue;
@@ -768,7 +865,7 @@
             // the nearest this stack can be: its middle less its radius, but no nearer than where the lowest ray on
             // screen comes down to the stack's top (a ground tile under the camera is not really four units away)
             const reach = (M.eye[2] - it.z - st.n * sc * zs) / Math.sin(Math.min(1.5, opt.cam.pitch + opt.cam.fov / 2)) * Math.cos(opt.cam.fov / 2);
-            const d = Math.max(4, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * zs * 1.15;
+            const d = Math.max(4 * U, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * zs * 1.15;
           }
         }
         if (rows > tallest && sides && Math.abs(cx) < cw && Math.abs(cy) < cw) tallest = rows;      // the tallest layer on screen (of stacks whose middle is in view and that have sides to fill)
@@ -795,14 +892,14 @@
               const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 * zs : 0); tmp[j + 3] = rot;
               tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v + row; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1 * zs;
-              keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
+              keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * zq)));      // highest first; the depth test does the rest
               continue;
             }
             for (let k = first; k < copies; k++) {
               const z = z0 + k / copies * k1 * zs, j = n * FL, up = z - it.z;
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
               tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v + row; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
-              let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
+              let key = Math.min(NB - 1, Math.max(0, Math.floor(z * zq))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
               keys[n++] = key;
             }
           }
@@ -894,7 +991,7 @@
       // internal pixel a clean square, centred, with a thin bar where the canvas does not divide evenly
       const scale = Math.max(1, Math.round(opt.scale));
       targets(Math.max(1, Math.floor(W / scale)), Math.max(1, Math.floor(H / scale)));
-      const M = cameraMatrices(opt.cam, iw / ih), n = build(opt.list, M, opt);
+      const U = opt.unit || 1, M = cameraMatrices(opt.cam, iw / ih, U), n = build(opt.list, M, opt);
       if (timerExt && !query) { query = gl.createQuery(); gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query); timing = true; }
       gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, n * FL), gl.DYNAMIC_DRAW);
       gl.viewport(0, 0, iw, ih); gl.disable(gl.BLEND);
@@ -927,22 +1024,27 @@
       // the light pass: once per pixel
       // (with cones, the build of the shader that has them, made the first time it is needed)
       const ns = Math.min(CONES, (opt.cones || []).length);
-      const on = (ns ? ['CONES_ON'] : []).concat(rowsOn ? ['ROWS_ON'] : []);
+      const HD = opt.hdr && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
+      const on = (ns ? ['CONES_ON'] : []).concat(rowsOn ? ['ROWS_ON'] : [], gmTex ? ['GROUND_ON'] : [], lmTex ? ['LIGHTMAP_ON'] : [], HD ? ['HDR_ON'] : []);
       const pl = on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight, u = pl.u, sun = env.sun;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
       if (rowsOn) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
+      if (gmTex) { gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, gmTex); gl.uniform1i(u.u_gm, 8); gl.uniform4fv(u.u_gmBox, gmBox); }
+      if (lmTex) { gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.uniform1i(u.u_lm, 9); gl.uniform4fv(u.u_lmBox, lmBox); gl.uniform1f(u.u_lmK, lmK); }
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
       gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
-      gl.uniform4f(u.u_world, world[0], world[1], opt.ground || 0, opt.time || 0);
+      gl.uniform4f(u.u_world, 0, 0, opt.ground || 0, opt.time || 0); gl.uniform4fv(u.u_hmBox, hmBox); gl.uniform3f(u.u_hmK, 255 * hmStep, 255 * hmStep - 2.5 * U, U);
+      gl.uniform4f(u.u_hh, env.hazeH ? env.hazeH[0] : 0, env.hazeH ? env.hazeH[1] : 0, 0, 0);
       // the shadow's softness follows the sun: its edge is wider on the ground when the light comes in low
-      gl.uniform4f(u.u_fx, opt.shadows ? 0.1 * sun[2] + 0.012 : 0, opt.ao ? 0.9 : 0, env.glow, opt.shadows ? env.cloud || 0 : 0);
+      // (env.soft, if given, sets it instead: near 0 for a hard light from far away)
+      gl.uniform4f(u.u_fx, opt.shadows ? (env.soft !== undefined ? Math.max(0.001, env.soft) : 0.1 * sun[2] + 0.012) : 0, opt.ao ? 0.9 : 0, env.glow, opt.shadows ? env.cloud || 0 : 0);
       // the sun's direction as it lies on the screen, two pixels long (for the rim)
       const sx = M.r[0] * sun[0] + M.r[1] * sun[1], sy = M.u[0] * sun[0] + M.u[1] * sun[1] + M.u[2] * sun[2], sl = Math.hypot(sx, sy) || 1;
-      gl.uniform4f(u.u_view, sx / sl * 2, sy / sl * 2, M.back - 140, 760);
+      gl.uniform4f(u.u_view, sx / sl * 2, sy / sl * 2, M.back - 140 * U, 760 * U);
       gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0);
       // the full walk: ${STEPS} steps to ${REACH} units, 16 occlusion samples. cheap: 14 longer steps to 90 units, 4 samples
-      if (opt.cheap) { gl.uniform4f(u.u_walk, 14, 1.22, 9, 90); gl.uniform1f(u.u_dirs, 4); } else { gl.uniform4f(u.u_walk, STEPS, 1.09, 4.6, REACH); gl.uniform1f(u.u_dirs, 8); } gl.uniform1f(u.u_water, opt.water || -9);
+      if (opt.cheap) { gl.uniform4f(u.u_walk, 14, 1.22, 9 * U, 90 * U); gl.uniform1f(u.u_dirs, 4); } else { gl.uniform4f(u.u_walk, STEPS, 1.09, 4.6 * U, REACH * U); gl.uniform1f(u.u_dirs, 8); } gl.uniform1f(u.u_water, opt.water || -9);
       const blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS), B = opt.blobs || [];
       B.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
       const nl = putLights(opt.lamps || []); putCones(opt.cones || [], opt.coneBlockers || null);
@@ -961,14 +1063,15 @@
       // depth buffer attached (it holds depths where the slices were drawn with the depth test: hsr or voxel mode).
       // The picture is tone-mapped colour; its alpha is how much each pixel blooms. The engine's state is put back after.
       if (opt.fx && !opt.heat) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.viewport(0, 0, iw, ih); opt.fx(gl, M, { w: iw, h: ih });
+        gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.viewport(0, 0, iw, ih); opt.fx(gl, M, { w: iw, h: ih, hdr: !!HD });
         gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.depthMask(true); gl.bindVertexArray(vaoFull); gl.activeTexture(gl.TEXTURE0);
       }
 
       // bloom: what glows, shrunk to a quarter, blurred across and down, then again wider
       if (opt.bloom && !opt.heat) {
-        pass(fboBloom[0], bw, bh, pBright, lit); gl.uniform2f(pBright.u.u_px, 1 / iw, 1 / ih); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        [[1.2, 0], [0, 1.2], [2.6, 0], [0, 2.6]].forEach(function (s, i) { pass(fboBloom[1 - (i & 1)], bw, bh, pBlur, bloom[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+        const pb = HD ? variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']) : pBright;
+        pass(blF[0], bw, bh, pb, litT); gl.uniform2f(pb.u.u_px, 1 / iw, 1 / ih); gl.uniform1f(pb.u.u_knee, env.knee || 1); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        [[1.2, 0], [0, 1.2], [2.6, 0], [0, 2.6]].forEach(function (s, i) { pass(blF[1 - (i & 1)], bw, bh, pBlur, bl[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
       }
 
       // to the canvas: the lit picture with its bloom, or the overdraw heat map, scaled up without smoothing
@@ -976,8 +1079,9 @@
       gl.viewport((W - iw * scale) >> 1, (H - ih * scale) >> 1, iw * scale, ih * scale); gl.activeTexture(gl.TEXTURE0);
       if (opt.heat) { gl.useProgram(pHeat.p); gl.bindTexture(gl.TEXTURE_2D, countTex); gl.uniform1i(pHeat.u.u_count, 0); gl.uniform1i(pHeat.u.u_channel, opt.heat - 1); gl.uniform1f(pHeat.u.u_unit, UNIT); }
       else {
-        gl.useProgram(pPost.p); gl.bindTexture(gl.TEXTURE_2D, lit); gl.uniform1i(pPost.u.u_tex, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bloom[0]); gl.uniform1i(pPost.u.u_bloom, 1);
-        gl.uniform2f(pPost.u.u_size, iw, ih); gl.uniform2f(pPost.u.u_k, opt.bloom ? 0.55 + 0.75 * env.glow : 0, 0.22);
+        const pp = HD ? variant('ph', VS_FULL, FS_POST, ['HDR_ON']) : pPost;
+        gl.useProgram(pp.p); gl.bindTexture(gl.TEXTURE_2D, litT); gl.uniform1i(pp.u.u_tex, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bl[0]); gl.uniform1i(pp.u.u_bloom, 1);
+        gl.uniform2f(pp.u.u_size, iw, ih); gl.uniform2f(pp.u.u_k, opt.bloom ? 0.55 + 0.75 * env.glow : 0, 0.22); if (HD) gl.uniform1f(pp.u.u_exp, env.exposure);
       }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
