@@ -628,6 +628,15 @@ function frame() {
 }
 ```
 
+**One shape for every item.** V8 (Chrome's JavaScript engine) gives every object a hidden class from its fields.
+An object that gains a field after it is made, or an integer field that later takes a fraction, changes class
+mid-run, and every optimised function that reads it is thrown away and rebuilt: a frame that stalls. The engine
+makes its own objects whole and with fractions from the start (the stats, the slice-effect scratch, the horde's
+scratch item, the item pool's items, the figure writer's items), and `Engine.item(stack, x, y, z, rot, scale)`
+makes an item the same way for a game. Measured on the demo, 1600 frames per case, before and after: the worst
+frame fell from 27.1 to 10.3 ms with 2000 vehicles, 20.8 to 15.0 with 6000 birds, 10.0 to 4.6 with the convoy
+and 18.0 to 9.2 at night; the 99th percentile fell by 10 to 33 % and the means by 3 to 8 %.
+
 **Palette rows.** `E.setPalette(bytes, rows)` takes up to 64 rows of 256 colours (`bytes` is 256 x rows x 4).
 An item's `row`, or a horde's `row` array, picks the row it is drawn in: a hit flash, a unit powered down, a
 building under construction, all from the same stack in the atlas. The row rides in the instance (in the

@@ -1144,7 +1144,12 @@
       for (let i = 0; i < 2; i++) { bloom[i] = texture(bw, bh, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR); fboBloom[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloom[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloom[i], 0); }
     }
 
-    const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, RINGS: RINGS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
+    const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, RINGS: RINGS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', hmW: 0, hmH: 0,
+      // (SHAPES. Every object the engine reads each frame gets all its fields when it is made, and a field that will
+      // hold a fraction starts as one: V8 then gives it one hidden class and stores the field as a double from the
+      // start. A field added later, or an integer field that later takes a fraction, changes the class mid-run and
+      // throws away the optimised code of every function that reads it.)
+      stats: { instances: 0, slices: 0, rows: 0.5, cpuMs: 0.5, gpuMs: null, written: null, covered: null, pixels: 0, pixelsHit: 0, exact: false, iw: 0, ih: 0 } };
     let palTex = null, hmTex = null, hmBox = [0, 0, 1, 1], hmStep = 0.5, hmTwo = false, query = null, timing = false;
     let gmTex = null, gmBox = null, lmTex = null, lmBox = null, lmK = 1;
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
@@ -1258,8 +1263,8 @@
     // or null (an index into frames: a walk or a flap, one stack per frame); fade Uint8Array or null (0..255); row
     // Uint8Array or null (the palette row: a hit flash, a unit powered down). Each
     // unit goes through the same culling and instance writing as an item (one scratch item, reused).
-    const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
-    const lift = new Float32Array(RINGS * 7), NOHORDE = [], unit = { stack: null, x: 0, y: 0, z: 0, rot: 0, scale: 1, only: -1, shx: 0, shy: 0, zs: 1, fade: 0, row: 0, lift: false, each: null, reach: 0 };
+    const moved = { dx: 0.5, dy: 0.5, dz: 0.5, rot: 0.5, scale: 1.5 };      // (fractions from the start: see SHAPES)
+    const lift = new Float32Array(RINGS * 7), NOHORDE = [], unit = newItem();
     function build(list, M, opt) {
       const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel, U = opt.unit || 1, zq = ZQ;      // zq: height buckets per world unit (2048 of them: 128 units)
       let n = 0, slices = 0, tallest = 0;
@@ -1602,7 +1607,7 @@
   // What the characters' draw functions call: queues slices of a figure standing at world scale `scale`.
   // lift: the height of the ground the figure stands on.
   function figureWriter(list, scale, lift) {
-    const put = function (st, i, x, y, z, rot) { list.push({ stack: st, x: x * scale, y: y * scale, z: z * scale + (lift || 0), rot: rot, scale: scale, only: i }); };
+    const put = function (st, i, x, y, z, rot) { const it = newItem(st, x * scale, y * scale, z * scale + (lift || 0), rot, scale); it.only = i; list.push(it); };
     return {
       // k (optional): this one slice drawn k times as wide, as thick as before
       slice: function (st, i, x, y, z, rot, k) { put(st, i, x, y, z, rot); if (k) { const it = list[list.length - 1]; it.scale *= k; it.zs = 1 / k; } },
@@ -1610,6 +1615,16 @@
       // (as many slices as it takes to keep them less than a layer apart, so a limb is solid from the side too)
       limb: function (st, a, b, n) { n = Math.max(n, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / 0.8)); for (let i = 0; i < n; i++) { const t = (i + 0.5) / n; put(st, 0, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t - 0.5, 0); } }
     };
+  }
+
+  // An item with every field the engine reads, the number fields already doubles (see SHAPES in create). Items made
+  // this way all share one hidden class, which keeps the build loop's reads fast; a game's own items do best with the
+  // same fields in the same order.
+  function newItem(stack, x, y, z, rot, scale) {
+    const it = { stack: null, x: 0.5, y: 0.5, z: 0.5, rot: 0.5, scale: 1.5, only: -1, shx: 0.5, shy: 0.5, zs: 1.5, fade: 0.5, row: 0, lift: false, each: null, reach: 0.5 };
+    it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.reach = 0;
+    if (stack) { it.stack = stack; it.x = x; it.y = y; it.z = z || 0; it.rot = rot || 0; it.scale = scale || 1; }
+    return it;
   }
 
   // A horde: thousands of moving stacks every frame. Making a new item for each of them every frame is garbage for
@@ -1622,7 +1637,7 @@
     return {
       begin: function (list) { out = list; n = 0; },
       add: function (stack, x, y, z, rot, scale) {
-        let it = pool[n]; if (!it) { it = {}; pool.push(it); } n++;
+        let it = pool[n]; if (!it) { it = newItem(); pool.push(it); } n++;
         it.stack = stack; it.x = x; it.y = y; it.z = z || 0; it.rot = rot || 0; it.scale = scale || 1; it.only = -1;
         it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.row = 0; it.lift = false; it.each = null; it.reach = 0;
         out.push(it); return it;
@@ -1631,5 +1646,5 @@
     };
   }
 
-  global.Engine = { create: create, figureWriter: figureWriter, cameraMatrices: cameraMatrices, itemPool: itemPool, HMAX: HMAX };
+  global.Engine = { create: create, figureWriter: figureWriter, cameraMatrices: cameraMatrices, itemPool: itemPool, item: newItem, HMAX: HMAX };
 })(window);

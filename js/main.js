@@ -73,7 +73,7 @@
   }
 
   const LAYOUT = Scene.layout();
-  const statics = SETS.map(function (S) { return LAYOUT.map(function (l) { return { stack: S.stacks[l.n], x: l.x, y: l.y, z: l.z, rot: l.rot, scale: l.scale, only: -1, sway: l.sway, shx: 0, shy: 0 }; }); });
+  const statics = SETS.map(function (S) { return LAYOUT.map(function (l) { const it = Engine.item(S.stacks[l.n], l.x, l.y, l.z, l.rot, l.scale); it.sway = l.sway; it.sprite = false; return it; }); });
   // Stacks that stand in many places and never change (trees, tufts, graves, poles) can be drawn as impostors.
   const often = {}; LAYOUT.forEach(function (l) { often[l.n] = (often[l.n] || 0) + 1; });
   const IMPOSTORS = SETS.map(function (S) { return DEFS.filter(function (d) { return often[d.name] >= 5 && !d.ground && !d.wheat; }).map(function (d) { return S.stacks[d.name]; }); });
@@ -361,7 +361,7 @@
 
   // Everything that moves without memory is a function of the time alone, so any frame can be asked for by number.
   function animate(t, set) {
-    const push = function (name, x, y, z, rot, scale) { list.push({ stack: set.stacks[name], x: x, y: y, z: z, rot: rot, scale: scale || 1, only: -1 }); };
+    const push = function (name, x, y, z, rot, scale) { list.push(Engine.item(set.stacks[name], x, y, z, rot, scale || 1)); };      // (Engine.item: one shape for every item)
     const wind = [-0.98, 0.17];
     // trees, grass and wheat lean with the wind: a slow wave that crosses the map
     const sw = swayers[S.shell ? 1 : 0];
