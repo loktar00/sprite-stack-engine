@@ -723,7 +723,7 @@ and fewer than 0.3 % of pixels differ by more than 30.
 | Contact shadows under figures the height map does not hold (up to 8) | `opt.contacts: [[x, y, radius, strength]]` |
 | Lamps with a windowed falloff, steep near the source, and a halo that follows the haze | `opt.falloff` (`'window'` by default here; `'linear'` for the day model's), `opt.lampCap` |
 | Palette glow as light, only partly dimmed by the haze | `emissive` |
-| The floor, where no slice was drawn | `floor` (a game's own GLSL: `vec3 floorAt(vec2 p, out vec3 n, out float wet, out float glow)`, with `hash`, `vnoise` and `u_time` to hand, and `floorUniforms(gl, uniforms)` to set its own), else the ground map, else `floorCol` |
+| The floor, where no slice was drawn | `floor` (a game's own GLSL: `vec3 floorAt(vec2 p, out vec3 n, out float wet, out float glow)`, with `hash`, `vnoise`, `u_time`, `u_floor[8]` (from `floorParams`) and `groundTexel(p)` (the ground map's raw texel) to hand, and `floorUniforms(gl, uniforms)` to set its own; it is built as its own shader, keyed by its source, and `E.warm({ night: true, floor })` builds it ahead), else the ground map, else `floorCol` |
 
 Cones, rings, the light map, the ground map and palette rows work in it as in the day model. Its distances
 are those of a scene whose art pixel is a tenth of a metre, scaled by `opt.unit`. It writes linear light (it

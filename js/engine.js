@@ -723,6 +723,16 @@
   }
   #endif
   #if FLOOR_ON
+  // a game's floor (light.floor). To hand: hash, vnoise, u_time, u_floor[8] (light.floorParams) and groundTexel(p)
+  // (the ground map's raw texel there: palette index A, B, wear, spare; all 0 without a ground map)
+  uniform vec4 u_floor[8];
+  vec4 groundTexel(vec2 p) {
+  #if GROUND_ON
+    vec2 gu = (p - u_gmBox.xy) / u_gmBox.zw;
+    if (gu.x >= 0.0 && gu.y >= 0.0 && gu.x < 1.0 && gu.y < 1.0) { ivec2 gs = textureSize(u_gm, 0); return texelFetch(u_gm, clamp(ivec2(gu * vec2(gs)), ivec2(0), gs - 1), 0); }
+  #endif
+    return vec4(0.0);
+  }
   FLOOR_SOURCE
   #endif
   // one point light (see the day model's lamp for the layout)
@@ -1484,7 +1494,7 @@
       if (night) {
         // THE NIGHT MODEL's own uniforms (see FS_NIGHT); light: { model: 'night', moon, moonCol, skyCol, earthCol,
         // fogCol, fog: [density, thinning, moon in the haze], fogNear, rim, rimWarm, emissive, floorCol, floor (GLSL),
-        // floorUniforms (function (gl, uniforms): sets the floor's own) }
+        // floorParams (up to 8 [x, y, z, w], read as u_floor), floorUniforms (function (gl, uniforms): sets the floor's own) }
         const fg = env.fog || [0, 0, 0];
         gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
         gl.uniform3fv(u.u_moon, env.moon); gl.uniform3fv(u.u_moonCol, env.moonCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_earthCol, env.earthCol || [0, 0, 0]);
@@ -1495,7 +1505,7 @@
         gl.uniform4f(u.u_look, env.fogNear || 0, env.rim || 0, 0, env.rimWarm || 0);
         const CT = opt.contacts || [], nc = Math.min(8, CT.length), cv = new Float32Array(32); for (let i = 0; i < nc; i++) cv.set(CT[i].slice(0, 4), i * 4);
         gl.uniform4fv(u.u_contact, cv); gl.uniform1i(u.u_ncontact, nc);
-        if (env.floor && env.floorUniforms) env.floorUniforms(gl, u);
+        if (env.floor) { const fp = new Float32Array(32); (env.floorParams || []).slice(0, 8).forEach(function (v, i) { fp.set(v.slice(0, 4), i * 4); }); gl.uniform4fv(u.u_floor, fp); if (env.floorUniforms) env.floorUniforms(gl, u); }
       } else {
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
       gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
