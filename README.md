@@ -829,6 +829,23 @@ that noise), more at 1440p night, where the third G-buffer target costs most. `?
 | --- | --- | --- |
 | A tank's turret and barrel over its hull | ![](media/self-tank-off.png) | ![](media/self-tank-on.png) |
 
+**Live: the occupancy march.** The baked shading cannot see other models, and the height map cannot hold an
+overhang. `Art.Occupancy(box, cell)` builds a coarse 3D grid of the scene from its stacks (each cell how full it is,
+from 2 x 2 x 2 samples of the models' voxels); `upload(E)` gives it to the engine, `stamp(x, y, z, rx, ry, h)` puts
+a moving thing in as a box and `flush(E)` sends just the blocks that changed (and puts back last frame's). With
+`opt.occ = { steps, strength }` the light pass marches it from each pixel towards the sun or the moon, smoothed,
+each pixel from its own fraction of a step, and the shadow it finds is combined with the height map's. Overhangs,
+a barrel over its hull, a tree's shadow on a wall beside it, the soldiers' shadows: true self- and cross-shadows.
+
+Cost: building the village's grid at 2-unit cells (256 x 192 x 64) takes 75 ms (517 ms at 1-unit cells, 25 MB).
+At run time, on a busy desktop (so take the numbers loosely), about +0.4 ms at 1920 x 1080 in the overview and
++0.7 ms in the street, more at 1440p, and a fixed part on the CPU for the moving things' blocks. It is meant for
+the High and Ultra presets. `?occ=1` in the demo (`&occsteps=64`, `&occcell=1`).
+
+| | Without | With |
+| --- | --- | --- |
+| A tree's shadow on the farmhouse wall | ![](media/occ-farm-off.png) | ![](media/occ-farm-on.png) |
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.

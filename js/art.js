@@ -231,6 +231,59 @@
     return st;
   }
 
+  // OCCUPANCY: a coarse 3D grid of the scene for the engine's occupancy march (E.setOccupancy). box: [x0, y0, z0,
+  // width, depth, height] in world units, cell: the size of a cell. Each cell holds how full it is, 0 to 255, from
+  // 2 x 2 x 2 samples of the stacks in it.
+  //   addStack(stack, x, y, z, rot, scale, zs)   a placed stack, as the engine draws it (the solid voxels of its model)
+  //   snapshot()                                 keep what is there now as the base the moving things are stamped over
+  //   stamp(x, y, z, rx, ry, h)                  a moving thing, as a box round (x, y) from z up to z + h: call between
+  //   flush(E)                                   frames, then flush, which puts the base back where last frame's boxes
+  //                                              were and sends both the old and the new blocks to the engine
+  function Occupancy(box, cell) {
+    this.box = box.slice(0, 6); this.cell = cell;
+    this.nx = Math.ceil(box[3] / cell); this.ny = Math.ceil(box[4] / cell); this.nz = Math.ceil(box[5] / cell);
+    this.data = new Uint8Array(this.nx * this.ny * this.nz); this.base = null; this.dirty = []; this.prev = [];
+  }
+  Occupancy.prototype.addStack = function (st, x, y, z, rot, scale, zs) {
+    const def = st.def, pad = def.pad || 0, W = def.w + pad * 2, H = def.h + pad * 2, n = def.layers, vox = st.vox;
+    const sc = (scale || 1) * (st.k || 1), sz = sc * (st.kz || 1) * (zs || 1), c = Math.cos(rot || 0), s = Math.sin(rot || 0), C = this.cell, B = this.box;
+    const r = Math.hypot(W, H) / 2 * sc, top = (z || 0) + n * sz;
+    const i0 = Math.max(0, Math.floor((x - r - B[0]) / C)), i1 = Math.min(this.nx - 1, Math.floor((x + r - B[0]) / C));
+    const j0 = Math.max(0, Math.floor((y - r - B[1]) / C)), j1 = Math.min(this.ny - 1, Math.floor((y + r - B[1]) / C));
+    const k0 = Math.max(0, Math.floor(((z || 0) - B[2]) / C)), k1 = Math.min(this.nz - 1, Math.floor((top - B[2]) / C));
+    for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      let hit = 0;
+      for (let q = 0; q < 8; q++) {
+        const wx = B[0] + (i + 0.25 + 0.5 * (q & 1)) * C, wy = B[1] + (j + 0.25 + 0.5 * ((q >> 1) & 1)) * C, wz = B[2] + (k + 0.25 + 0.5 * (q >> 2)) * C;
+        const dx = wx - x, dy = wy - y, lx = Math.floor((dx * c + dy * s) / sc + W / 2), ly = Math.floor((-dx * s + dy * c) / sc + H / 2), lz = Math.floor((wz - (z || 0)) / sz);
+        if (lx >= 0 && ly >= 0 && lz >= 0 && lx < W && ly < H && lz < n && vox[(lz * H + ly) * W + lx]) hit++;
+      }
+      if (hit) { const o = (k * this.ny + j) * this.nx + i, v = Math.round(hit * 255 / 8); if (v > this.data[o]) this.data[o] = v; }
+    }
+  };
+  Occupancy.prototype.snapshot = function () { this.base = this.data.slice(); };
+  Occupancy.prototype.stamp = function (x, y, z, rx, ry, h) {
+    const C = this.cell, B = this.box;
+    const i0 = Math.max(0, Math.floor((x - rx - B[0]) / C)), i1 = Math.min(this.nx - 1, Math.floor((x + rx - B[0]) / C));
+    const j0 = Math.max(0, Math.floor((y - ry - B[1]) / C)), j1 = Math.min(this.ny - 1, Math.floor((y + ry - B[1]) / C));
+    const k0 = Math.max(0, Math.floor((z - B[2]) / C)), k1 = Math.min(this.nz - 1, Math.floor((z + h - B[2]) / C));
+    if (i1 < i0 || j1 < j0 || k1 < k0) return;
+    for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) this.data[(k * this.ny + j) * this.nx + i] = 255;
+    this.dirty.push([i0, j0, k0, i1 - i0 + 1, j1 - j0 + 1, k1 - k0 + 1]);
+  };
+  Occupancy.prototype.flush = function (E) {
+    const self = this, send = function (b) {
+      const out = new Uint8Array(b[3] * b[4] * b[5]); let o = 0;
+      for (let k = 0; k < b[5]; k++) for (let j = 0; j < b[4]; j++) { const a = ((b[2] + k) * self.ny + b[1] + j) * self.nx + b[0]; out.set(self.data.subarray(a, a + b[3]), o); o += b[3]; }
+      E.patchOccupancy(out, b[0], b[1], b[2], b[3], b[4], b[5]);
+    };
+    const restore = function (b) { for (let k = 0; k < b[5]; k++) for (let j = 0; j < b[4]; j++) { const a = ((b[2] + k) * self.ny + b[1] + j) * self.nx + b[0]; self.data.set(self.base.subarray(a, a + b[3]), a); } };
+    this.prev.forEach(function (b) { send(b); });          // last frame's blocks: the data was put back before this frame's boxes
+    this.dirty.forEach(function (b) { send(b); });
+    this.dirty.forEach(restore); this.prev = this.dirty; this.dirty = [];
+  };
+  Occupancy.prototype.upload = function (E) { E.setOccupancy(this.data, this.nx, this.ny, this.nz, this.box); };
+
   // deterministic noise for speckle, stones and leaves: hash() is white noise, noise() is smooth
   function hash(x, y, z) { let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(z | 0, 2147483647)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
   function noise(x, y, seed) {
@@ -239,5 +292,5 @@
     return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
   }
 
-  global.Art = { Palette: Palette, Atlas: Atlas, buildStack: buildStack, bakeSelf: bakeSelf, hash: hash, noise: noise };
+  global.Art = { Palette: Palette, Atlas: Atlas, Occupancy: Occupancy, buildStack: buildStack, bakeSelf: bakeSelf, hash: hash, noise: noise };
 })(typeof window !== 'undefined' ? window : globalThis);

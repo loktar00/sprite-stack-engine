@@ -45,9 +45,6 @@
   const NIGHT = Q.has('night'), mEl = 0.42, mAz = Math.atan2(-0.6, 0.8);
   const NIGHT_LIGHT = { model: 'night', moon: [Math.cos(mEl) * Math.cos(mAz), Math.cos(mEl) * Math.sin(mAz), Math.sin(mEl)], moonCol: [0.92, 1.12, 1.55], skyCol: [0.075, 0.115, 0.19],
     earthCol: [0.035, 0.032, 0.03], fogCol: [0.032, 0.052, 0.088], fog: [0.0025, 0.03, 0.08], emissive: 3.5, fogNear: 120, rim: 0.9, rimWarm: 0.05, floorCol: [0.07, 0.065, 0.05] };
-  // the optional builds of the shaders this page will use, made now rather than on the first frame that needs each
-  // (?nowarm=1 leaves them to be made when first needed, to measure the hitch that saves)
-  if (!Q.has('nowarm')) E.warm({ self: SELF, night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
   // ?groundmap=1: the country round the map from a ground map (a 4-unit cell, two palette indices and a wear): the
   // road carried on past both edges as worn ruts, fields of pasture and plough, and a few old shell scorches,
   // in the village's own colours. The map itself is drawn by its tiles; the ground map shows past its edge.
@@ -81,6 +78,18 @@
 
   const LAYOUT = Scene.layout();
   const statics = SETS.map(function (S) { return LAYOUT.map(function (l) { const it = Engine.item(S.stacks[l.n], l.x, l.y, l.z, l.rot, l.scale); it.sway = l.sway; it.sprite = false; return it; }); });
+  // ?occ=1: a 3D occupancy grid of the village (2-unit cells, ?occcell to change), marched towards the sun or the
+  // moon for shadows the height map cannot hold (Art.Occupancy, opt.occ)
+  let OCC = null;
+  if (Q.has('occ')) {
+    const t0 = performance.now(), cell = num('occcell', 2);
+    OCC = new Art.Occupancy([0, 0, 0, Scene.WORLD.w, Scene.WORLD.h, 128], cell);
+    statics[0].forEach(function (it) { if (!it.stack.def.ground) OCC.addStack(it.stack, it.x, it.y, it.z, it.rot, it.scale, 1); });
+    OCC.snapshot(); OCC.upload(E); OCC.ms = performance.now() - t0;
+  }
+  // the optional builds of the shaders this page will use, made now rather than on the first frame that needs each
+  // (?nowarm=1 leaves them to be made when first needed, to measure the hitch that saves)
+  if (!Q.has('nowarm')) E.warm({ occ: !!OCC, self: SELF, night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
   // Stacks that stand in many places and never change (trees, tufts, graves, poles) can be drawn as impostors.
   const often = {}; LAYOUT.forEach(function (l) { often[l.n] = (often[l.n] || 0) + 1; });
   const IMPOSTORS = SETS.map(function (S) { return DEFS.filter(function (d) { return often[d.name] >= 5 && !d.ground && !d.wheat; }).map(function (d) { return S.stacks[d.name]; }); });
@@ -444,6 +453,10 @@
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
       cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings, lightMapScale: env.glow };      // ?hdr=1: the half-float picture (see the README)
     RO.quality = QUALITY; if (SELF) RO.self = { atlas: set.self, occlusion: 1, shadow: 1 };
+    if (OCC) {      // ?occ=1: the occupancy march; the soldiers are stamped in as boxes each frame
+      walkers.forEach(function (k) { const P = Rig.pose(k.rig), x = P.x * SCALE, y = P.y * SCALE; OCC.stamp(x, y, Scene.groundAt(x, y), 1.6, 1.6, C.height * SCALE); });
+      OCC.flush(E); RO.occ = { steps: num('occsteps', 32), strength: num('occk', 1.2) };
+    }
     if (NIGHT) {      // ?night=1: the night model and the film post (see the README); the lanterns are lit, the soldiers get contact shadows
       RO.light = NIGHT_LIGHT; RO.lampCap = 0.55; RO.post = { bloom: 0.4, vignette: 0.42, grain: 0.012, exposure: 1.8, grade: [0.26, 0.012, 1.16, 1], knee: 1.6, dof: [cam.mode === 'persp' ? cam.dist : 600, cam.mode === 'persp' ? cam.dist * 0.6 : 400, 0.5, 0.35] };
       RO.contacts = walkers.slice(0, 8).map(function (k) { const P = Rig.pose(k.rig); return [P.x * SCALE, P.y * SCALE, 4.5, 0.5]; });
@@ -516,7 +529,7 @@
     requestAnimationFrame(tick);
   }
   window.demo = {
-    frames: Q.has('fx') ? 240 : TOUR, fps: 60, engine: E, cam: cam, state: S, views: VIEWS, scene: Scene,
+    frames: Q.has('fx') ? 240 : TOUR, fps: 60, engine: E, occMs: OCC ? OCC.ms : 0, cam: cam, state: S, views: VIEWS, scene: Scene,
     ready: Promise.resolve({ frames: Q.has('fx') ? 240 : TOUR, fps: 60 }),
     seek: function (f) { playing = false; fit(); draw(f); draw(f); showHud(E.stats.cpuMs); return f; },      // twice: the choice of voxel mode follows the frame before
     set: function (o) { Object.keys(o).forEach(function (k) { if (k in S && k !== 'q' && k !== 'res') S[k] = o[k]; else if (k === 'view') { cam.tz = 0; Object.assign(cam, VIEWS[o[k]]); } else if (k === 'q') quality(o[k]); else if (k === 'res') { S.res = height(String(o[k])); S.q = ''; } else cam[k] = o[k]; }); },

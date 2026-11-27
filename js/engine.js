@@ -308,6 +308,27 @@
 
   // The light pass. Everything here is worked out from three things per pixel (colour, facing, height) and one
   // small texture of the whole map (u_hm: the height of the tallest solid thing over every ground cell).
+  // THE OCCUPANCY MARCH (opt.occ, with E.setOccupancy): a coarse 3D texture of the scene, how full each cell is
+  // (built from the stacks by Art.Occupancy, moving things stamped in each frame), marched from the pixel towards the
+  // key light. It catches what the height map cannot hold: an overhang, a barrel over its own hull, a leg under a
+  // body, one model's shadow on another's side. The march starts a cell out along the facing, each pixel at its own
+  // fraction of a step, and adds up how full the cells are on the way (optical depth).
+  const OCC = `
+  #if OCC_ON
+  uniform highp sampler3D u_occ; uniform vec3 u_occO, u_occS; uniform vec4 u_occQ;      // origin, size; steps, step, strength, start
+  float occShadow(vec3 p, vec3 n, vec3 L) {
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    vec3 q = p + n * u_occQ.w + L * (u_occQ.y * (0.5 + ign)), dq = L * u_occQ.y; float od = 0.0;
+    for (int i = 0; i < 128; i++) {
+      if (float(i) >= u_occQ.x) break;
+      vec3 w = (q - u_occO) / u_occS;
+      if (w.x < 0.0 || w.y < 0.0 || w.x > 1.0 || w.y > 1.0 || w.z > 1.0) break;
+      od += textureLod(u_occ, w, 0.0).r; q += dq;
+      if (od * u_occQ.z > 6.0) break;
+    }
+    return exp(-od * u_occQ.z);
+  }
+  #endif`;
   const FS_LIGHT = `#version 300 es
   precision highp float;
   #define CONES_ON 0
@@ -319,6 +340,7 @@
   #define TWO_ON 0
   #define FILM_ON 0
   #define SELF_ON 0
+  #define OCC_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
   uniform vec2 u_self;        // the self-shading's strength: occlusion, shadow
   uniform float u_falloff;    // 0: the lamps fall off as (1 - r / reach)^2; 1: windowed and steep near the source (opt.falloff)
@@ -375,6 +397,7 @@
 #endif
   float height(ivec2 px) { vec4 g = texelFetch(u_g1, clamp(px, ivec2(0), textureSize(u_g1, 0) - 1), 0); return (g.r * 65280.0 + g.g * 255.0) / 65535.0 * ${HMAX}.0; }
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  ${OCC}
   float vnoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y); }
   // The country beyond the map, which no stack covers: a patchwork of fields with hedges between them, made up
   // on the spot from noise. It is flat and it is soon lost in the haze; it only has to stop the map from
@@ -512,6 +535,9 @@
         if (sh <= 0.0 || s.z > u_hmK.y) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
+#if OCC_ON
+      sh = min(sh, occShadow(p, n, u_sun));
+#endif
       // Moving things are not in the height map. Each is an upright cylinder (soldiers, the jeep) or a blob in
       // the air (smoke, birds): the ray to the sun is tested against its axis.
       for (int i = 0; i < ${BLOBS}; i++) {
@@ -681,6 +707,7 @@
   #define TWO_ON 0
   #define FLOOR_ON 0
   #define SELF_ON 0
+  #define OCC_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
   uniform vec2 u_self;
   uniform float u_classic;    // light.walk 'classic': the moon's walk as it was before the filtered map, the jitter and the near cap
@@ -749,6 +776,7 @@
   float clearFast(vec3 s) { return clearOf(s); }
   #endif
   float fogAt(float z) { return u_fog.x * exp(-max(z, 0.0) * u_fog.y); }
+  ${OCC}
   // where another internal pixel of this frame lies in the world (its stored height on its own view ray); sky: far away
   vec3 worldAt(ivec2 q) {
     ivec2 S = textureSize(u_g0, 0); q = clamp(q, ivec2(0), S - 1);
@@ -880,6 +908,9 @@
         if (sh <= 0.0) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
+#if OCC_ON
+      sh = min(sh, occShadow(p, n, u_moon));
+#endif
     }
     // occlusion: land that rises close round the pixel takes sky away; land overhead (a canopy) takes some too
     float ao = 1.0;
@@ -1167,14 +1198,14 @@
       return variant('g' + kind + on.join(), kind === 'v' ? VS_VOXEL : kind === 'i' ? VS_IMP : VS_SLICE, kind === 'v' ? FS_GVOXEL : kind === 'i' ? FS_GIMP : FS_G, on);
     }
     // the light pass for a set of features
-    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film, self) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : [], self ? ['SELF_ON'] : []);
+    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film, self, occ) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : [], self ? ['SELF_ON'] : [], occ ? ['OCC_ON'] : []);
       return on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight;
     }
     // the night model for a set of features, and a game's floor (GLSL source, or none)
     const floors = [];
-    function nightProgram(cones, rows, ground, lightMap, rings, two, floor, self) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : [], self ? ['SELF_ON'] : []);
+    function nightProgram(cones, rows, ground, lightMap, rings, two, floor, self, occ) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : [], self ? ['SELF_ON'] : [], occ ? ['OCC_ON'] : []);
       let fi = floor ? floors.indexOf(floor) : -1; if (floor && fi < 0) { floors.push(floor); fi = floors.length - 1; }
       return variant('n' + on.join() + '|' + fi, VS_FULL, floor ? FS_NIGHT.replace('FLOOR_SOURCE', floor) : FS_NIGHT, on);
     }
@@ -1262,12 +1293,12 @@
       if (!warmFbo) { warmFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), 0); gl.bindTexture(gl.TEXTURE_2D, null); }      // (unbound, or the programs would sample their own target)
       const night = !!f.night && floatOK, film = (night || !!f.post) && floatOK, hdr = (!!f.hdr || film) && floatOK, progs = [];
       [false, !!f.cones].forEach(function (c, i) { if (i && !c) return; [false, !!f.rings].forEach(function (r, j) { if (j && !r) return;
-        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null, !!f.self) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film, !!f.self)); }); });
+        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null, !!f.self, !!f.occ) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film, !!f.self, !!f.occ)); }); });
       if (film) progs.push(variant('knee', VS_FULL, FS_KNEE, []), variant('down', VS_FULL, FS_DOWN, []), variant('film', VS_FULL, FS_FILM, []));
       if (f.rows || f.self) progs.push(gProgram('f', !!f.rows, !!f.self), gProgram('v', !!f.rows, !!f.self), gProgram('i', !!f.rows, !!f.self));
       if (hdr && !film) progs.push(variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']), variant('ph', VS_FULL, FS_POST, ['HDR_ON']));
       gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.viewport(0, 0, 1, 1); gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.bindVertexArray(vaoFull);
-      progs.forEach(function (p) { gl.useProgram(p.p); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+      progs.forEach(function (p) { gl.useProgram(p.p); if (p.u.u_occ) gl.uniform1i(p.u.u_occ, 10); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });      // (a 3D sampler may not share unit 0 with the 2D ones)
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       return progs.length;
     };
@@ -1288,6 +1319,19 @@
       else { hmTex = texture(w, h, two ? gl.RG8 : gl.R8, F, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); E.hmW = w; E.hmH = h; hmTwo = two; }
       hmBox = box ? box.slice(0, 4) : [0, 0, w, h]; hmStep = step || 0.5;
     };
+    // THE OCCUPANCY (optional, opt.occ): a 3D texture of how full each cell of the scene is, one byte a cell, x fastest
+    // then y then z, over box [x0, y0, z0, width, depth, height] (Art.Occupancy builds it); patchOccupancy changes a
+    // block of it (moving things). It is read smoothed. null switches it off.
+    let occTex = null, occBox = [0, 0, 0, 1, 1, 1], occCell = 1;
+    E.setOccupancy = function (bytes, nx, ny, nz, box) {
+      if (!bytes) { occTex = null; return; }
+      occTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_3D, occTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, nx, ny, nz, 0, gl.RED, gl.UNSIGNED_BYTE, bytes);
+      [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER].forEach(function (k) { gl.texParameteri(gl.TEXTURE_3D, k, gl.LINEAR); });
+      [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R].forEach(function (k) { gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE); });
+      occBox = box.slice(0, 6); occCell = box[3] / nx;
+    };
+    E.patchOccupancy = function (bytes, x, y, z, w, h, d) { gl.bindTexture(gl.TEXTURE_3D, occTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage3D(gl.TEXTURE_3D, 0, x, y, z, w, h, d, gl.RED, gl.UNSIGNED_BYTE, bytes); };
     // THE GROUND MAP (optional): open ground (where no slice was drawn) inside `box` takes its colour from this, a
     // texel per cell, RGBA: palette index A, palette index B, wear (0 all A, 255 all B), unused. null switches it off.
     E.setGroundMap = function (bytes, w, h, box) { if (!bytes) { gmTex = null; return; } gmTex = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); gmBox = box.slice(0, 4); };
@@ -1538,6 +1582,7 @@
     //        falloff ('window' for the steep windowed lamp falloff), contacts [[x, y, radius, strength]] (night),
     //        self ({ atlas: [self0, self1] (E.makeAtlas of an Art.Atlas's self0 and self1), occlusion, shadow (strengths, 1) }:
     //        the models' baked self-shading),
+    //        occ ({ steps (32), step (3/4 of a cell), strength (1.2), start (a cell) }: the occupancy march, see setOccupancy),
     //        post ({ dof: [focus, depth, row, strength], grade: [contrast, black, saturation, shadow blue], grain,
     //        vignette, exposure, bloom, knee }: the film post, on the half-float picture),
     //        lightMapScale (the light map's strength this frame: 1 if not given, 0 by day),
@@ -1593,7 +1638,14 @@
       // the night model and the film post both need the half-float picture
       const night = env.model === 'night', film = !!(opt.post || night) && floatOK;
       const HD = (opt.hdr || night || opt.post) && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
-      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null, !!SF) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film, !!SF), u = pl.u, sun = env.sun;
+      const OC = opt.occ && occTex ? opt.occ : null;
+      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null, !!SF, !!OC) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film, !!SF, !!OC), u = pl.u, sun = env.sun;
+      if (OC) {
+        gl.useProgram(pl.p); const st = OC.step || occCell * 0.75;
+        gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_3D, occTex); gl.uniform1i(u.u_occ, 10);
+        gl.uniform3f(u.u_occO, occBox[0], occBox[1], occBox[2]); gl.uniform3f(u.u_occS, occBox[3], occBox[4], occBox[5]);
+        gl.uniform4f(u.u_occQ, Math.max(1, Math.min(128, OC.steps || 32)), st, (OC.strength !== undefined ? OC.strength : 1.2) * st / occCell, OC.start !== undefined ? OC.start : occCell);
+      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
       if (rowsOn || SF) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }
