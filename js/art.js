@@ -113,9 +113,11 @@
 
   // A stack ready to draw: for each kept layer its place in the atlas and its offset from the stack's axis.
   // Slices are put in the atlas tallest first within a stack only by chance; the packing is plain rows.
+  // def.res / def.zres (optional, default 1): the model is sampled that many times finer than the scene's art pixel,
+  // across and upward; the engine draws it that much smaller (k, kz), so a detailed close-up model fits the scene.
   function buildStack(def, pal, atlas, shell) {
     const v = voxelise(def, pal, shell), pad = def.pad || 0;
-    const st = { name: def.name, def: def, shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], runs: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1 };
+    const st = { name: def.name, def: def, k: 1 / (def.res || 1), kz: (def.res || 1) / (def.zres || def.res || 1), shell: shell, w: def.w, h: def.h, n: def.layers, pad: pad, slices: [], runs: [], radius: Math.hypot(def.w, def.h) / 2, vox: v.vox, flat: def.layers === 1 };
     // two layers are the same when they are cropped alike and every pixel (material and normal) matches
     const same = function (A, B) {
       if (A.x0 !== B.x0 || A.y0 !== B.y0 || A.w !== B.w || A.h !== B.h) return false;

@@ -17,12 +17,19 @@
 // VOXEL MODE is the second way the slice pass can draw (see the block at VS_VOXEL). Flat slices stay solid only
 // while the camera looks down on them steeply enough; below that the engine draws every slice as the box it
 // stands for, with side faces and a depth test, and stacks are solid from any angle.
+//
+// LIGHTS AND HORDES (see the README section of that name). Up to 256 point lights, read from a small float
+// texture so their number costs no uniforms; each can be occluded by the height map and can glow in the haze.
+// Up to 16 cone lights (searchlights, headlamps): a pool where they land and a beam through the air, both cut
+// by a small shadow table per cone. Every instance can be faded (a screen-door dither) or stretched upward. An
+// fx hook draws particles into the lit picture, depth-tested against the slice pass. itemPool reuses the items of
+// a horde frame to frame, so thousands of moving stacks make no garbage.
 (function (global) {
   'use strict';
-  const FL = 12;                      // floats per instance: pos 3, rot 1, rect 4, offset 2, scale 1, box height 1 (voxel mode)
+  const FL = 12;                      // floats per instance: pos 3, rot 1, rect 4 (the fade rides in its first: see a_rectf), offset 2, scale 1, box height 1 (voxel mode)
   const NB = 2048, ZQ = 16;           // height buckets, and buckets per unit of height
   const HMAX = 128;                   // tallest thing the G-buffer and the height map can hold
-  const LAMPS = 8, BLOBS = 24, STEPS = 48, REACH = 195;
+  const LIGHTS = 256, CONES = 16, BINS = 64, BLOBS = 24, STEPS = 48, REACH = 195;     // point lights, cone lights, bins per cone in its shadow table
   const ANGLES = 32, IMP_W = 4096, IMP_H = 2048, IMP_PPU = 3, IL = 15;      // impostors: views per stack, their atlas, its pixels per unit, floats per sprite
 
   // ---------------------------------------------------------------- small matrix helpers (column-major 4x4)
@@ -57,12 +64,14 @@
 
   // ---------------------------------------------------------------- shaders
   const VS_SLICE = `#version 300 es
-  layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rect;
+  layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rectf;
   layout(location=3) in vec2 a_off; layout(location=4) in float a_scale; layout(location=5) in vec2 a_corner;
   uniform mat4 u_vp; uniform float u_guard;                 // u_guard: half a pixel, in clip units (0 turns it off)
-  out vec2 v_uv; flat out vec4 v_rect; flat out vec2 v_cs; out float v_h;
+  out vec2 v_uv; flat out vec4 v_rect; flat out vec2 v_cs; out float v_h; flat out float v_fade;
   void main() {
     vec2 corner = a_corner;                                 // (0,0) (1,0) (0,1) (1,1): the same four for every instance
+    // the slice's rectangle in the atlas starts on a whole texel; the fraction of its first number is half the fade
+    vec4 a_rect = vec4(floor(a_rectf.x), a_rectf.yzw); v_fade = (a_rectf.x - a_rect.x) * 2.0;
     float c = cos(a_rot), s = sin(a_rot);
     vec2 l = (a_off + (corner - 0.5) * a_rect.zw) * a_scale, m = a_off * a_scale;
     vec4 p = u_vp * vec4(a_pos + vec3(l.x * c - l.y * s, l.x * s + l.y * c, 0.0), 1.0);
@@ -72,12 +81,24 @@
     p.y += (p.y / p.w >= q.y / q.w ? 1.0 : -1.0) * u_guard * p.w;
     gl_Position = p; v_uv = a_rect.xy + corner * a_rect.zw; v_rect = a_rect; v_cs = vec2(c, s); v_h = a_pos.z;
   }`;
+  // FADE: screen-door transparency. An instance with a fade leaves out that share of its pixels in a fixed 4x4
+  // (Bayer) pattern, so what is behind it shows through without sorting or blending: a tree between the camera
+  // and the player, a wreck sinking out of sight.
+  const FADED = `
+  bool faded(float f) {
+    if (f <= 0.0) return false;
+    ivec2 q = ivec2(gl_FragCoord.xy) & 3; int a = q.x ^ q.y;
+    int v = ((a & 1) << 3) | ((q.y & 1) << 2) | (a & 2) | ((q.y >> 1) & 1);
+    return (float(v) + 0.5) / 16.0 < f;
+  }`;
   const FS_G = `#version 300 es
   precision highp float;
   uniform sampler2D u_atlas;
-  in vec2 v_uv; flat in vec4 v_rect; flat in vec2 v_cs; in float v_h;
+  in vec2 v_uv; flat in vec4 v_rect; flat in vec2 v_cs; in float v_h; flat in float v_fade;
   layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  ${FADED}
   void main() {
+    if (faded(v_fade)) discard;
     vec4 t = texelFetch(u_atlas, ivec2(clamp(v_uv, v_rect.xy, v_rect.xy + v_rect.zw - 0.001)), 0);
     if (t.r == 0.0) discard;                                // an empty pixel of the slice
     vec3 n = t.gba * 2.0 - 1.0; n.xy = vec2(n.x * v_cs.x - n.y * v_cs.y, n.x * v_cs.y + n.y * v_cs.x);   // turn the facing with the slice
@@ -112,11 +133,12 @@
   // Cost. One box (12 triangles) per slice instead of up to 48 quads, a short loop per fragment, and no early
   // depth test, because the shader writes depth. The numbers are in the README.
   const VS_VOXEL = `#version 300 es
-  layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rect;
+  layout(location=0) in vec3 a_pos; layout(location=1) in float a_rot; layout(location=2) in vec4 a_rectf;
   layout(location=3) in vec2 a_off; layout(location=4) in float a_scale; layout(location=5) in vec3 a_box; layout(location=6) in float a_span;
   uniform mat4 u_vp; uniform vec3 u_eye, u_fwd; uniform float u_ortho;
-  out vec3 v_p, v_d; flat out vec4 v_rect, v_base; flat out vec3 v_how; flat out vec2 v_off;
+  out vec3 v_p, v_d; flat out vec4 v_rect, v_base; flat out vec3 v_how; flat out vec2 v_off; flat out float v_fade;
   void main() {
+    vec4 a_rect = vec4(floor(a_rectf.x), a_rectf.yzw); v_fade = (a_rectf.x - a_rect.x) * 2.0;     // (the fade: see VS_SLICE)
     float c = cos(a_rot), s = sin(a_rot);
     vec2 l = (a_off + (a_box.xy - 0.5) * a_rect.zw) * a_scale;
     vec3 w = a_pos + vec3(l.x * c - l.y * s, l.x * s + l.y * c, a_box.z * a_span);
@@ -131,7 +153,7 @@
   in vec3 v_p, v_d; flat in vec4 v_rect, v_base; flat in vec3 v_how;
   // Step the ray through the slice's texels (the classic grid walk). t: the texel hit. q: where, in texels.
   bool walk(out vec4 t, out vec3 q) {
-    vec3 dir = normalize(v_d); vec2 size = v_rect.zw;
+    vec3 dir = v_d / max(length(v_d), 1e-6); vec2 size = v_rect.zw;
     vec3 p = vec3(clamp(v_p.xy, vec2(0.001), size - 0.001), v_p.z);
     ivec2 cell = ivec2(p.xy), lim = ivec2(size + 0.5), stp = ivec2(dir.x < 0.0 ? -1 : 1, dir.y < 0.0 ? -1 : 1);
     vec2 inv = 1.0 / max(abs(dir.xy), vec2(0.00001));
@@ -155,10 +177,12 @@
   const FS_GVOXEL = `#version 300 es
   precision highp float;
   ${WALK}
-  flat in vec2 v_off;
+  flat in vec2 v_off; flat in float v_fade;
   uniform vec3 u_eye, u_fwd;
   layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+  ${FADED}
   void main() {
+    if (faded(v_fade)) discard;
     vec4 t; vec3 q; if (!walk(t, q)) discard;
     vec3 n = t.gba * 2.0 - 1.0; n.xy = vec2(n.x * v_how.x - n.y * v_how.y, n.x * v_how.y + n.y * v_how.x);
     float hw; gl_FragDepth = depthOf(q, v_off, hw);
@@ -244,7 +268,10 @@
   // small texture of the whole map (u_hm: the height of the tallest solid thing over every ground cell).
   const FS_LIGHT = `#version 300 es
   precision highp float;
-  uniform sampler2D u_g0, u_g1, u_pal, u_hm;
+  #define CONES_ON 0
+  uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  uniform highp sampler2D u_lt;  // the lights' table (float): a column per light, rows 0-2 point lights from the ninth on, rows 3-6 cones
+  uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];   // the first eight point lights, as uniforms: the common case reads no texture
   uniform mat4 u_inv;
   uniform vec3 u_sun, u_sunCol, u_skyCol, u_bounceCol, u_hazeCol, u_outer, u_eye, u_fwd;
   uniform vec4 u_world;       // the map's width and depth, the level of open ground, the time in seconds
@@ -254,7 +281,8 @@
   uniform vec4 u_walk;        // the shadow walk: steps, how much each grows, the longest, the reach
   uniform float u_dirs;       // ambient occlusion: directions sampled (8, or 4 at one distance for the low preset)
   uniform float u_water;      // the palette index of water
-  uniform vec4 u_lamp[${LAMPS}]; uniform vec3 u_lampCol[${LAMPS}];
+  uniform int u_nl, u_ns;     // how many point lights there are (all of them) and how many cones
+  uniform float u_lampCap;    // 0: lights add up freely; above 0 their sum is rolled off per pixel (many lights, no white-out)
   uniform vec4 u_blob[${BLOBS}]; uniform float u_blobLow[${BLOBS}]; uniform int u_nblob;
   in vec2 v_uv; out vec4 o;
 
@@ -279,6 +307,55 @@
     c = mix(vec3(l), c, 1.16);
     c += vec3(0.022, 0.006, -0.022) * smoothstep(0.4, 1.0, l) + vec3(-0.014, 0.0, 0.022) * (1.0 - smoothstep(0.0, 0.45, l));
     return clamp(c, 0.0, 1.0);
+  }
+#if CONES_ON
+  // CONES. Table rows per cone k: 3 origin and range, 4 axis and cos(half angle), 5 colour and beam strength,
+  // 6 the yaw and half width of its shadow table. How much of cone k reaches a point s (and how far it is):
+  // a soft edge, a linear falloff to the range, a brighter core.
+  float spotOf(vec4 S, vec4 D, vec3 s, out float dist) {
+    vec3 v = s - S.xyz; dist = length(v); if (dist > S.w || dist < 0.01) return 0.0;
+    float c = dot(v / dist, D.xyz), ch = D.w;
+    return smoothstep(ch, ch + (1.0 - ch) * 0.35, c) * (1.0 - dist / S.w) * (0.55 + 0.45 * smoothstep(ch + (1.0 - ch) * 0.5, 1.0, c));
+  }
+  // A cone's shadow table (u_cone): one row per cone, one bin per angle round its light as seen from above. A bin
+  // holds the distance to the first blocker that way (16 bits, as a share of the range) and how tall it is (8 bits,
+  // of ${HMAX}). Behind a blocker a point is lit only above the line from the light over the blocker's top. Two
+  // bins are mixed so the edge of a post's wedge is not a stair.
+  float coneBin(int k, int b, vec4 S, vec3 s, float d) {
+    vec4 t = texelFetch(u_cone, ivec2(clamp(b, 0, ${BINS - 1}), k), 0);
+    float bd = (t.r * 65280.0 + t.g * 255.0) / 65535.0 * S.w, bh = t.b * ${HMAX}.0;
+    if (d < bd + S.w * 0.004) return 1.0;
+    float lz = S.z + (bh - S.z) * d / max(bd, S.w * 0.001);
+    return clamp((s.z - lz) / max(S.w * 0.02, 0.01) + 0.5, 0.0, 1.0);
+  }
+  float coneShadow(int k, vec4 S, vec4 X, vec3 s) {
+    if (X.z < 0.5) return 1.0;                               // no table for this cone
+    vec2 h = s.xy - S.xy; float d = length(h);
+    if (d < 0.01) return 1.0;
+    float a = atan(h.y, h.x + 1e-5) - X.x; a = mod(a + 3.14159265, 6.2831853) - 3.14159265;
+    float f = (a / max(X.y, 0.01) * 0.5 + 0.5) * ${BINS}.0 - 0.5;
+    if (f < -1.0 || f > ${BINS}.0) return 1.0;
+    float i = floor(f); int b = int(i);
+    return mix(coneBin(k, b, S, s, d), coneBin(k, b + 1, S, s, d), f - i);
+  }
+#endif
+  // One point light at p. L: position and reach. C: colour and occlusion (1: test the height map between the light
+  // and the pixel, seven steps). hk: the halo's strength. The halo is the light scattered in the air: where the view
+  // ray passes closest to the light.
+  void lamp(vec4 L, vec4 C, float hk, vec3 p, vec3 n, vec3 ray, float dist, inout vec3 irr, inout vec3 halo) {
+    vec3 d3 = L.xyz - p; float r = length(d3);
+    if (r < L.w) {
+      float att = 1.0 - r / L.w, occ = 1.0;
+      if (C.w > 0.5) {
+        vec3 q = p + vec3(n.xy * 3.5, 1.3), e = L.xyz - q;   // start off the surface, as the sun's walk does
+        for (int k = 1; k < 8; k++) { vec3 s = q + e * (float(k) / 8.0); occ = min(occ, clamp((s.z - land(s.xy)) * 0.5 + 0.5, 0.0, 1.0)); }
+      }
+      irr += C.rgb * att * att * occ * (0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0));
+    }
+    if (hk > 0.0) {
+      float tt = clamp(dot(L.xyz - u_eye, ray), 0.0, dist), hr = L.w * 0.45, dp = length(u_eye + ray * tt - L.xyz);
+      if (dp < hr) { float q = 1.0 - dp / max(hr, 0.001); halo += C.rgb * hk * q * q * q; }
+    }
   }
   void main() {
     ivec2 px = ivec2(gl_FragCoord.xy);
@@ -380,11 +457,42 @@
       vec3 v = normalize(u_eye - p), hv = normalize(u_sun + v);
       col = col * 0.75 + u_skyCol * 0.3 + u_sunCol * pow(max(dot(n, hv), 0.0), 120.0) * sh;
     }
-    // Lamps: point lights that fall off to nothing at their reach.
-    for (int i = 0; i < ${LAMPS}; i++) {
-      vec4 L = u_lamp[i];
-      if (L.w > 0.0) { vec3 d3 = L.xyz - p; float r = length(d3), att = max(0.0, 1.0 - r / L.w); col += alb * u_lampCol[i] * att * att * (0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0)); }
+    // POINT LIGHTS: they fall off to nothing at their reach. The first eight are uniforms (a loop the compiler can
+    // unroll, as cheap as it always was); the rest are read from the table: rows 0 position and reach, 1 colour and
+    // occlusion, 2 the halo.
+    vec3 irr = vec3(0.0), halo = vec3(0.0); float dist = length(p - u_eye);
+    for (int i = 0; i < 8; i++) { if (u_lamp[i].w > 0.0) lamp(u_lamp[i], u_lampCol[i], u_lampHalo[i], p, n, ray, dist, irr, halo); }
+    for (int i = 8; i < ${LIGHTS}; i++) {
+      if (i >= u_nl) break;
+      lamp(texelFetch(u_lt, ivec2(i, 0), 0), texelFetch(u_lt, ivec2(i, 1), 0), texelFetch(u_lt, ivec2(i, 2), 0).x, p, n, ray, dist, irr, halo);
     }
+    // CONE LIGHTS: the pool where the beam lands, and the beam in the air, marched in 12 steps along the part of the
+    // view ray inside the cone's bounding sphere (each pixel starts its steps at a different offset). Compiled only
+    // into the second build of this shader, used while there are cones: the first stays as light as before.
+    vec3 beam = vec3(0.0);
+#if CONES_ON
+    for (int k = 0; k < ${CONES}; k++) {
+      if (k >= u_ns) break;
+      vec4 S = texelFetch(u_lt, ivec2(k, 3), 0), D = texelFetch(u_lt, ivec2(k, 4), 0), K = texelFetch(u_lt, ivec2(k, 5), 0), X = texelFetch(u_lt, ivec2(k, 6), 0);
+      float dd, s0 = spotOf(S, D, p, dd);
+      if (s0 > 0.0) irr += K.rgb * s0 * coneShadow(k, S, X, p) * (0.35 + 0.65 * max(dot(n, (S.xyz - p) / max(dd, 0.01)), 0.0));
+      if (K.w > 0.0) {
+        vec3 cc = S.xyz + D.xyz * S.w * 0.5;
+        float sn = sqrt(max(1.0 - D.w * D.w, 0.0)), rs = S.w * (0.5 + sn / max(D.w, 0.2) * 0.9);
+        vec3 oc = u_eye - cc; float bq = dot(oc, ray), disc = bq * bq - (dot(oc, oc) - rs * rs);
+        if (disc > 0.0) {
+          float sq = sqrt(disc), t0 = max(-bq - sq, 0.0), t1 = min(-bq + sq, dist);
+          if (t1 > t0) {
+            float ds = (t1 - t0) / 12.0, jit = hash(vec2(px) + float(k) * 13.7), acc = 0.0;
+            for (int i = 0; i < 12; i++) { float sd; vec3 s = u_eye + ray * (t0 + (float(i) + jit) * ds); float sp = spotOf(S, D, s, sd); if (sp > 0.0) acc += sp * coneShadow(k, S, X, s); }
+            beam += K.rgb * K.w * acc * ds / max(S.w, 0.01);
+          }
+        }
+      }
+    }
+#endif
+    if (u_lampCap > 0.0) irr = irr / (1.0 + max(irr.r, max(irr.g, irr.b)) * u_lampCap);
+    col += alb * irr;
     // Pixels that shine. A glow of 1 in the palette always shines (fire). A smaller glow is a lamp or a window:
     // dull by day, and lit as dusk falls. The amount goes out in alpha, and the bloom pass spreads it.
     float e = glow > 0.98 ? 1.0 : glow * u_fx.z;
@@ -394,6 +502,10 @@
     float hz = clamp((dot(p - u_eye, u_fwd) - u_view.z) / u_view.w, 0.0, 1.0);
     col = mix(col, u_hazeCol, hz * hz * u_tone.y * (1.0 - e));
     col = mix(col, u_hazeCol, fade);
+    // the lights' halos and the beams are in the air in front of the surface: after the haze, each rolled off so a
+    // beam seen down its length cannot white the frame out
+    halo = halo / (1.0 + max(halo.r, max(halo.g, halo.b)) * 0.8); beam = beam / (1.0 + max(beam.r, max(beam.g, beam.b)) * 1.2);
+    col += (halo + beam) * (1.0 - fade);
     o = vec4(finish(col), e * (1.0 - fade));
   }`;
   const FS_HEAT = `#version 300 es
@@ -403,7 +515,7 @@
   void main() {
     vec4 c = texture(u_count, v_uv); float n = (u_channel == 0 ? c.r : c.g) / u_unit;
     // 0 black, 1 dark blue, 4 green, 16 yellow, 64 red, 256 white (a step of colour for every doubling)
-    float t = n < 0.5 ? 0.0 : (log2(n) + 1.0) / 9.0;
+    float t = n < 0.5 ? 0.0 : (log2(max(n, 0.5)) + 1.0) / 9.0;
     vec3 col = t <= 0.0 ? vec3(0.0) : t < 0.33 ? mix(vec3(0.05, 0.10, 0.45), vec3(0.10, 0.75, 0.35), t / 0.33)
       : t < 0.55 ? mix(vec3(0.10, 0.75, 0.35), vec3(0.98, 0.90, 0.20), (t - 0.33) / 0.22)
       : t < 0.78 ? mix(vec3(0.98, 0.90, 0.20), vec3(0.92, 0.15, 0.12), (t - 0.55) / 0.23) : mix(vec3(0.92, 0.15, 0.12), vec3(1.0), min(1.0, (t - 0.78) / 0.22));
@@ -495,6 +607,7 @@
     const vaoFull = gl.createVertexArray(); gl.bindVertexArray(vaoFull); gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0);
 
     // render targets, made again when the internal resolution changes
+    let pLightC = null;                                      // the light pass with cone lights compiled in (see the light pass)
     let iw = 0, ih = 0, bw = 0, bh = 0, g0, g1, lit, countTex, depth, fboG, fboLit, fboCount, bloom = [], fboBloom = [];
     function targets(w, h) {
       if (w === iw && h === ih) return; iw = w; ih = h; bw = Math.max(1, w >> 2); bh = Math.max(1, h >> 2);
@@ -505,12 +618,13 @@
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
       fboLit = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lit, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);      // so the fx hook can test against the slice pass
       fboCount = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, countTex, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
       for (let i = 0; i < 2; i++) { bloom[i] = texture(bw, bh, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR); fboBloom[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboBloom[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloom[i], 0); }
     }
 
-    const E = { gl: gl, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
+    const E = { gl: gl, program: program, floatOK: floatOK, LIGHTS: LIGHTS, CONES: CONES, BINS: BINS, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown', stats: { instances: 0, slices: 0, cpuMs: 0, gpuMs: null, written: null, covered: null } };
     let palTex = null, hmTex = null, world = [1, 1], query = null, timing = false;
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
 
@@ -522,9 +636,56 @@
     // a part of it again, when something on the map changes height (a wall lowered, a roof blown off)
     E.patchHeightMap = function (bytes, x, y, w, h) { gl.bindTexture(gl.TEXTURE_2D, hmTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RED, gl.UNSIGNED_BYTE, bytes); };
 
+    // The lights' table: a float texture, a column per light (see FS_LIGHT), filled each frame from opt.lamps and
+    // opt.cones. And the cones' shadow tables: a row of BINS bins per cone, filled from opt.coneBlockers.
+    const LROWS = 7, ltData = new Float32Array(LIGHTS * LROWS * 4), ltTex = texture(LIGHTS, LROWS, gl.RGBA32F, gl.RGBA, gl.FLOAT, ltData);
+    const coneBytes = new Uint8Array(BINS * CONES * 4), coneTex = texture(BINS, CONES, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, coneBytes);
+    const binD = new Float32Array(BINS), binH = new Float32Array(BINS);
+    // A cone: [x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]. The axis need not be unit length; beam is how
+    // strongly it shows in the air (0: only the pool). Returns how many cones went into the table.
+    function putCones(C, blockers) {
+      const ns = Math.min(CONES, C.length), L4 = LIGHTS * 4;
+      for (let k = 0; k < ns; k++) {
+        const c = C[k], l = Math.hypot(c[4], c[5], c[6]) || 1, dx = c[4] / l, dy = c[5] / l, dz = c[6] / l, half = c[7], j = k * 4;
+        // how wide the cone is seen from above, round its light: its shadow table must span that (all round, for a cone that points down)
+        const yaw = Math.atan2(dy, dx), tilt = Math.asin(Math.max(-1, Math.min(1, -dz))), hw = tilt + half > 1.25 ? Math.PI : Math.min(Math.PI, half / Math.max(0.25, Math.cos(tilt + half * 0.5)) + 0.15);
+        ltData.set([c[0], c[1], c[2], Math.max(0.1, c[3])], 3 * L4 + j); ltData.set([dx, dy, dz, Math.cos(half)], 4 * L4 + j);
+        ltData.set([c[8], c[9], c[10], c[11] || 0], 5 * L4 + j); ltData.set([yaw, hw, blockers ? 1 : 0, 0], 6 * L4 + j);
+        if (!blockers) continue;
+        // the shadow table: per angle round the light, how far to the nearest blocker [x, y, radius, height] and how tall it is
+        binD.fill(c[3]); binH.fill(0);
+        for (let q = 0; q < blockers.length; q++) {
+          const b = blockers[q], bx = b[0] - c[0], by = b[1] - c[1], d = Math.hypot(bx, by); if (d < b[2] * 0.5 || d - b[2] > c[3]) continue;
+          let a = Math.atan2(by, bx) - yaw; a -= Math.round(a / (2 * Math.PI)) * 2 * Math.PI;
+          const w = Math.asin(Math.min(1, b[2] / d)), b0 = Math.floor(((a - w) / hw * 0.5 + 0.5) * BINS), b1 = Math.floor(((a + w) / hw * 0.5 + 0.5) * BINS);
+          for (let i = Math.max(0, b0); i <= Math.min(BINS - 1, b1); i++) if (d - b[2] < binD[i]) { binD[i] = Math.max(0, d - b[2]); binH[i] = b[3]; }
+        }
+        for (let i = 0; i < BINS; i++) { const v = Math.round(Math.max(0, Math.min(1, binD[i] / c[3])) * 65535), o = (k * BINS + i) * 4; coneBytes[o] = v >> 8; coneBytes[o + 1] = v & 255; coneBytes[o + 2] = Math.round(Math.max(0, Math.min(1, binH[i] / HMAX)) * 255); coneBytes[o + 3] = 255; }
+      }
+      if (blockers && ns) { gl.bindTexture(gl.TEXTURE_2D, coneTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, BINS, ns, gl.RGBA, gl.UNSIGNED_BYTE, coneBytes); }
+      return ns;
+    }
+    // A point light: [x, y, z, reach, r, g, b, occlude (1: shadowed by the height map), halo (its glow in the air)].
+    // Returns how many went into the table.
+    // The first eight go in uniforms (lampU, lampC, lampH), the rest in the table.
+    const lampU = new Float32Array(32), lampC = new Float32Array(32), lampH = new Float32Array(8);
+    function putLights(L) {
+      const nl = Math.min(LIGHTS, L.length), L4 = LIGHTS * 4;
+      lampU.fill(0); lampC.fill(0); lampH.fill(0);
+      for (let i = 0; i < nl; i++) {
+        const l = L[i], j = i * 4, U = i < 8 ? lampU : ltData, A = i < 8 ? 0 : L4, a = i < 8 ? lampC : ltData;
+        U[j] = l[0]; U[j + 1] = l[1]; U[j + 2] = l[2]; U[j + 3] = Math.max(0.1, l[3]);
+        a[A + j] = l[4]; a[A + j + 1] = l[5]; a[A + j + 2] = l[6]; a[A + j + 3] = l[7] || 0;
+        if (i < 8) lampH[i] = l[8] || 0; else ltData[2 * L4 + j] = l[8] || 0;
+      }
+      return nl;
+    }
+
     // Turn slices into sorted instances. list: [{ stack, x, y, z, rot, scale, only (one slice index, or -1 for all),
     // shx, shy (optional: how far the stack leans per unit of height, for trees and wheat in the wind),
-    // each (optional: function (layer, layers, out) -> out or null, moves or hides single slices: the slice effects) }]
+    // zs (optional: each layer drawn zs times as tall), fade (optional, 0 to 1: the share of its pixels left out),
+    // each (optional: function (layer, layers, out) -> out or null, moves or hides single slices: the slice effects),
+    // reach (optional: how far each can move a slice, for culling; 60 if not given) }]
     const moved = { dx: 0, dy: 0, dz: 0, rot: 0, scale: 1 };
     function build(list, M, opt) {
       const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel;
@@ -533,9 +694,10 @@
       // shell: the copies have to be closer together than the shell is deep along that ray.
       const slope = Math.tan(Math.max(0.06, M.ortho ? opt.cam.pitch : opt.cam.pitch - opt.cam.fov * 0.35));
       for (let q = 0; q < list.length; q++) {
-        const it = list[q], st = it.stack, sc = it.scale, one = it.only >= 0;
+        // sc, zs: the item's scale and how much taller each layer is drawn (zs, optional), with the stack's own sampling (art.js: res, zres)
+        const it = list[q], st = it.stack, sc = it.scale * (st.k || 1), one = it.only >= 0, zs = (it.zs || 1) * (st.kz || 1), zk = (st.k || 1) * (st.kz || 1);
         // Leave out what the camera cannot see: a sphere round the stack against the edges of the view.
-        const zc = one ? it.z : it.z + st.n * sc * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * 0.5)) * sc + (it.each ? 60 : 2);
+        const zc = one ? it.z : it.z + st.n * sc * zs * 0.5, R = (one ? st.radius : Math.hypot(st.radius, st.n * zs * 0.5)) * sc + (it.each ? it.reach || 60 : 2);      // reach: how far an effect can move slices
         const cw = vp[3] * it.x + vp[7] * it.y + vp[11] * zc + vp[15], cx = vp[0] * it.x + vp[4] * it.y + vp[8] * zc + vp[12], cy = vp[1] * it.x + vp[5] * it.y + vp[9] * zc + vp[13];
         if (!M.ortho && cw < -R) continue;                     // behind the camera
         if ((M.ortho || cw > R) && (Math.abs(cx) - R * M.px > cw || Math.abs(cy) - R * M.py > cw)) continue;
@@ -543,12 +705,12 @@
         // how many screen rows one layer of this stack is tall: that many copies of each slice
         let rows = 1;
         if (opt.fill || opt.lod || voxel) {
-          if (M.ortho) rows = ppuOrtho * M.cp * sc;
+          if (M.ortho) rows = ppuOrtho * M.cp * sc * zs;
           else {
             // the nearest this stack can be: its middle less its radius, but no nearer than where the lowest ray on
             // screen comes down to the stack's top (a ground tile under the camera is not really four units away)
-            const reach = (M.eye[2] - it.z - st.n * sc) / Math.sin(Math.min(1.5, opt.cam.pitch + opt.cam.fov / 2)) * Math.cos(opt.cam.fov / 2);
-            const d = Math.max(4, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * 1.15;
+            const reach = (M.eye[2] - it.z - st.n * sc * zs) / Math.sin(Math.min(1.5, opt.cam.pitch + opt.cam.fov / 2)) * Math.cos(opt.cam.fov / 2);
+            const d = Math.max(4, reach, (it.x - M.eye[0]) * M.f[0] + (it.y - M.eye[1]) * M.f[1] + (it.z - M.eye[2]) * M.f[2] - st.radius * sc); rows = ih / (2 * d * M.th) * Math.min(1, M.cp + 0.25) * sc * zs * 1.15;
           }
         }
         if (rows > tallest && sides && Math.abs(cx) < cw && Math.abs(cy) < cw) tallest = rows;      // the tallest layer on screen (of stacks whose middle is in view and that have sides to fill)
@@ -558,13 +720,13 @@
         const copies = voxel ? 1 : Math.max(st.shell ? Math.ceil(1 / (st.shell * slope)) : 1, Math.min(48, Math.ceil(opt.fill ? rows : 1)));
         // voxel mode draws runs (layers that repeat merged into one taller box) unless an effect moves single slices
         const src = voxel && !one && !it.each ? st.runs : st.slices;
-        const a = one ? it.only : 0, b = one ? it.only + 1 : src.length, shx = it.shx || 0, shy = it.shy || 0;
+        const a = one ? it.only : 0, b = one ? it.only + 1 : src.length, shx = it.shx || 0, shy = it.shy || 0, fade = Math.max(0, Math.min(1, it.fade || 0)) * 0.5;      // (half the fade, added to the atlas column: see VS_SLICE)
         // (a layer with no side, flat ground, needs no fill: it is drawn once, at the top of its layer)
         if (n + (b - a) * copies * 4 > cap) { while (n + (b - a) * copies * 4 > cap) cap *= 2; const i2 = new Float32Array(cap * FL), t2 = new Float32Array(cap * FL), k2 = new Uint16Array(cap); t2.set(tmp); k2.set(keys); inst = i2; tmp = t2; keys = k2; }
         for (let s = a; s < b; s++) {
           if (skip > 1 && (b - 1 - s) % skip) continue;
-          const sl = src[s], first = sl.sides ? 0 : copies - 1; let x0 = it.x, y0 = it.y, z0 = it.z + (one ? 0 : sl.z * sc), rot = it.rot, k1 = sc;
-          if (it.each) { const m = it.each(sl.z, st.n, moved); if (!m) continue; x0 += m.dx; y0 += m.dy; z0 += m.dz; rot += m.rot; k1 *= m.scale; }
+          const sl = src[s], first = sl.sides ? 0 : copies - 1; let x0 = it.x, y0 = it.y, z0 = it.z + (one ? 0 : sl.z * sc * zs), rot = it.rot, k1 = sc;
+          if (it.each) { const m = it.each(sl.z * zk, st.n * zk, moved); if (!m) continue; x0 += m.dx; y0 += m.dy; z0 += m.dz; rot += m.rot; k1 *= m.scale; }
           slices++;
           // a hollow slice is drawn as the strips round its hole (see art.js), unless that is switched off
           const parts = opt.split ? sl.parts : sl.whole;
@@ -573,15 +735,15 @@
             if (voxel) {
               // VOXEL MODE: one box per slice or run, as tall as the layers it stands for (paper thin, at the top of its layer, for ground with no side)
               const j = n * FL, up = z0 - it.z, thin = !sl.sides, tall = thin ? 0.03 : s === b - 1 ? sl.n : Math.max(sl.n, skip);
-              tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 : 0); tmp[j + 3] = rot;
-              tmp[j + 4] = pt.u; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1;
+              tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z0 + (thin ? (sl.n - 0.03) * k1 * zs : 0); tmp[j + 3] = rot;
+              tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = tall * k1 * zs;
               keys[n++] = NB - 1 - Math.min(NB - 1, Math.max(0, Math.floor(z0 * ZQ)));      // highest first; the depth test does the rest
               continue;
             }
             for (let k = first; k < copies; k++) {
-              const z = z0 + k / copies * k1, j = n * FL, up = z - it.z;
+              const z = z0 + k / copies * k1 * zs, j = n * FL, up = z - it.z;
               tmp[j] = x0 + shx * up; tmp[j + 1] = y0 + shy * up; tmp[j + 2] = z; tmp[j + 3] = rot;
-              tmp[j + 4] = pt.u; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
+              tmp[j + 4] = pt.u + fade; tmp[j + 5] = pt.v; tmp[j + 6] = pt.w; tmp[j + 7] = pt.h; tmp[j + 8] = pt.ox; tmp[j + 9] = pt.oy; tmp[j + 10] = k1; tmp[j + 11] = 0;
               let key = Math.min(NB - 1, Math.max(0, Math.floor(z * ZQ))); if (opt.hsr) key = NB - 1 - key;      // painter: lowest first; hidden-surface removal: highest first
               keys[n++] = key;
             }
@@ -665,7 +827,9 @@
     //        split (hollow slices as strips round their hole), cheap (shorter shadow walk, fewer occlusion samples), impostors (items drawn as sprites: needs the depth test and the parallel camera), heat (0 off, 1 written, 2 covered), measure, scale (canvas pixels per
     //        internal pixel), shadows, ao, bloom, water (palette index), time (seconds),
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
-    //        lamps [[x, y, z, reach, r, g, b]], blobs [[x, y, top, radius, bottom]] }
+    //        lamps [[x, y, z, reach, r, g, b, occlude, halo]] (up to 256), lampCap (roll off the lights' sum: 0 off),
+    //        cones [[x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]] (up to 16), coneBlockers [[x, y, radius, height]],
+    //        blobs [[x, y, top, radius, bottom]], fx (function (gl, M, size): draws into the lit picture, see the README) }
     E.render = function (opt) {
       const t0 = performance.now(), W = canvas.width, H = canvas.height, env = opt.light;
       // the picture is drawn at 1 / scale of the canvas (scale: a whole number) and shown scale times larger, each
@@ -702,8 +866,11 @@
       }
 
       // the light pass: once per pixel
-      const u = pLight.u, sun = env.sun;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.useProgram(pLight.p); gl.bindVertexArray(vaoFull);
+      // (with cones, the build of the shader that has them, made the first time it is needed)
+      const ns = Math.min(CONES, (opt.cones || []).length);
+      if (ns && !pLightC) pLightC = program(VS_FULL, FS_LIGHT.replace('#define CONES_ON 0', '#define CONES_ON 1'));
+      const pl = ns ? pLightC : pLight, u = pl.u, sun = env.sun;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
       gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
@@ -716,11 +883,27 @@
       gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0);
       // the full walk: ${STEPS} steps to ${REACH} units, 16 occlusion samples. cheap: 14 longer steps to 90 units, 4 samples
       if (opt.cheap) { gl.uniform4f(u.u_walk, 14, 1.22, 9, 90); gl.uniform1f(u.u_dirs, 4); } else { gl.uniform4f(u.u_walk, STEPS, 1.09, 4.6, REACH); gl.uniform1f(u.u_dirs, 8); } gl.uniform1f(u.u_water, opt.water || -9);
-      const lamps = new Float32Array(LAMPS * 4), lampCol = new Float32Array(LAMPS * 3), blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS);
-      opt.lamps.slice(0, LAMPS).forEach(function (l, i) { lamps.set(l.slice(0, 4), i * 4); lampCol.set(l.slice(4, 7), i * 3); });
-      opt.blobs.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
-      gl.uniform4fv(u.u_lamp, lamps); gl.uniform3fv(u.u_lampCol, lampCol); gl.uniform4fv(u.u_blob, blobs); gl.uniform1fv(u.u_blobLow, low); gl.uniform1i(u.u_nblob, Math.min(BLOBS, opt.blobs.length));
+      const blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS), B = opt.blobs || [];
+      B.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
+      const nl = putLights(opt.lamps || []); putCones(opt.cones || [], opt.coneBlockers || null);
+      // only the rows in use go up: the shader reads no further than u_nl and u_ns
+      gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, ltTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      if (nl > 8) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, LIGHTS, 3, gl.RGBA, gl.FLOAT, ltData.subarray(0, LIGHTS * 12));
+      if (ns) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 3, LIGHTS, 4, gl.RGBA, gl.FLOAT, ltData.subarray(LIGHTS * 12));
+      gl.uniform1i(u.u_lt, 5); gl.uniform1i(u.u_nl, nl); gl.uniform1f(u.u_lampCap, opt.lampCap || 0);
+      gl.uniform4fv(u.u_lamp, lampU); gl.uniform4fv(u.u_lampCol, lampC); gl.uniform1fv(u.u_lampHalo, lampH);
+      if (ns) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, coneTex); gl.uniform1i(u.u_cone, 6); gl.uniform1i(u.u_ns, ns); }
+      gl.uniform4fv(u.u_blob, blobs); gl.uniform1fv(u.u_blobLow, low); gl.uniform1i(u.u_nblob, Math.min(BLOBS, B.length));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.activeTexture(gl.TEXTURE0);
+
+      // THE FX HOOK: the game draws particles (sparks, tracers, smoke) into the lit picture, with the slice pass's
+      // depth buffer attached (it holds depths where the slices were drawn with the depth test: hsr or voxel mode).
+      // The picture is tone-mapped colour; its alpha is how much each pixel blooms. The engine's state is put back after.
+      if (opt.fx && !opt.heat) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.viewport(0, 0, iw, ih); opt.fx(gl, M, { w: iw, h: ih });
+        gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.depthMask(true); gl.bindVertexArray(vaoFull); gl.activeTexture(gl.TEXTURE0);
+      }
 
       // bloom: what glows, shrunk to a quarter, blurred across and down, then again wider
       if (opt.bloom && !opt.heat) {
@@ -763,12 +946,32 @@
   function figureWriter(list, scale, lift) {
     const put = function (st, i, x, y, z, rot) { list.push({ stack: st, x: x * scale, y: y * scale, z: z * scale + (lift || 0), rot: rot, scale: scale, only: i }); };
     return {
-      slice: function (st, i, x, y, z, rot) { put(st, i, x, y, z, rot); },
+      // k (optional): this one slice drawn k times as wide, as thick as before
+      slice: function (st, i, x, y, z, rot, k) { put(st, i, x, y, z, rot); if (k) { const it = list[list.length - 1]; it.scale *= k; it.zs = 1 / k; } },
       stack: function (st, x, y, z, rot) { for (let i = 0; i < st.slices.length; i++) put(st, i, x, y, z + st.slices[i].z, rot); },
       // (as many slices as it takes to keep them less than a layer apart, so a limb is solid from the side too)
       limb: function (st, a, b, n) { n = Math.max(n, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / 0.8)); for (let i = 0; i < n; i++) { const t = (i + 0.5) / n; put(st, 0, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t - 0.5, 0); } }
     };
   }
 
-  global.Engine = { create: create, figureWriter: figureWriter, cameraMatrices: cameraMatrices, HMAX: HMAX };
+  // A horde: thousands of moving stacks every frame. Making a new item for each of them every frame is garbage for
+  // the collector to sweep; a pool hands out the same items again. Once a frame: begin(list). Then per thing:
+  // add(stack, x, y, z, rot, scale), which puts a reused item on the list and returns it (set fade, zs, shx... on it
+  // as needed: every optional field is reset). Animation is a choice of stack: one stack per gait frame, picked
+  // from the thing's phase, so a moving horde costs no more to draw than a standing one.
+  function itemPool() {
+    const pool = []; let n = 0, out = null;
+    return {
+      begin: function (list) { out = list; n = 0; },
+      add: function (stack, x, y, z, rot, scale) {
+        let it = pool[n]; if (!it) { it = {}; pool.push(it); } n++;
+        it.stack = stack; it.x = x; it.y = y; it.z = z || 0; it.rot = rot || 0; it.scale = scale || 1; it.only = -1;
+        it.shx = 0; it.shy = 0; it.zs = 1; it.fade = 0; it.each = null; it.reach = 0;
+        out.push(it); return it;
+      },
+      get size() { return pool.length; }
+    };
+  }
+
+  global.Engine = { create: create, figureWriter: figureWriter, cameraMatrices: cameraMatrices, itemPool: itemPool, HMAX: HMAX };
 })(window);
