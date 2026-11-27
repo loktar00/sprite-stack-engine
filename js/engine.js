@@ -746,6 +746,7 @@
   float clearFast(vec3 s) { vec2 h = hm(s.xy); return max(s.z - h.x, h.y - s.z); }
   #else
   float clearOf(vec3 s) { vec2 h = hm(s.xy); return max(s.z - h.x, h.y - s.z); }
+  float clearFast(vec3 s) { return clearOf(s); }
   #endif
   float fogAt(float z) { return u_fog.x * exp(-max(z, 0.0) * u_fog.y); }
   // where another internal pixel of this frame lies in the world (its stored height on its own view ray); sky: far away
