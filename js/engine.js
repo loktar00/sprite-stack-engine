@@ -819,7 +819,8 @@
         }
         for (let i = 0; i < BINS; i++) { const v = Math.round(Math.max(0, Math.min(1, binD[i] / c[3])) * 65535), o = (k * BINS + i) * 4; coneBytes[o] = v >> 8; coneBytes[o + 1] = v & 255; coneBytes[o + 2] = Math.round(Math.max(0, Math.min(1, binH[i] / HMAX)) * 255); coneBytes[o + 3] = 255; }
       }
-      if (blockers && ns) { gl.bindTexture(gl.TEXTURE_2D, coneTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, BINS, ns, gl.RGBA, gl.UNSIGNED_BYTE, coneBytes); }
+      if (blockers && ns) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, coneTex);      // (its own unit: binding it to whatever unit was active would knock out the light map or the ground map)
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, BINS, ns, gl.RGBA, gl.UNSIGNED_BYTE, coneBytes); }
       return ns;
     }
     // A point light: [x, y, z, reach, r, g, b, occlude (1: shadowed by the height map), halo (its glow in the air)].
@@ -1018,6 +1019,7 @@
     //        light { sun, sunCol, skyCol, bounceCol, hazeCol, hazeK, glow, exposure, outer, cloud },
     //        lamps [[x, y, z, reach, r, g, b, occlude, halo]] (up to 256), lampCap (roll off the lights' sum: 0 off),
     //        cones [[x, y, z, range, dx, dy, dz, half angle, r, g, b, beam]] (up to 16), coneBlockers [[x, y, radius, height]],
+    //        lightMapScale (the light map's strength this frame: 1 if not given, 0 by day),
     //        rings [[x, y, z, radius, width, r, g, b, glow, lift]] (up to 8: a band of light round a centre, an expanding pulse),
     //        blobs [[x, y, top, radius, bottom]], fx (function (gl, M, size): draws into the lit picture, see the README) }
     E.render = function (opt) {
@@ -1073,7 +1075,7 @@
         gl.uniform4fv(u.u_ring, rp); gl.uniform4fv(u.u_ringCol, rc); gl.uniform1fv(u.u_ringGlow, rg); gl.uniform1i(u.u_nr, nr);
       }
       if (gmTex) { gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, gmTex); gl.uniform1i(u.u_gm, 8); gl.uniform4fv(u.u_gmBox, gmBox); }
-      if (lmTex) { gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.uniform1i(u.u_lm, 9); gl.uniform4fv(u.u_lmBox, lmBox); gl.uniform1f(u.u_lmK, lmK); }
+      if (lmTex) { gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.uniform1i(u.u_lm, 9); gl.uniform4fv(u.u_lmBox, lmBox); gl.uniform1f(u.u_lmK, lmK * (opt.lightMapScale !== undefined ? opt.lightMapScale : 1)); }
       gl.uniformMatrix4fv(u.u_inv, false, M.inv); gl.uniform3fv(u.u_sun, sun); gl.uniform3fv(u.u_sunCol, env.sunCol); gl.uniform3fv(u.u_skyCol, env.skyCol); gl.uniform3fv(u.u_bounceCol, env.bounceCol);
       gl.uniform3fv(u.u_hazeCol, env.hazeCol); gl.uniform3fv(u.u_outer, env.outer); gl.uniform3fv(u.u_eye, M.eye); gl.uniform3fv(u.u_fwd, M.f);
       gl.uniform4f(u.u_world, 0, 0, opt.ground || 0, opt.time || 0); gl.uniform4fv(u.u_hmBox, hmBox); gl.uniform3f(u.u_hmK, 255 * hmStep, 255 * hmStep - 2.5 * U, U);
