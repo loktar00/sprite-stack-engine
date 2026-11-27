@@ -754,6 +754,48 @@ gets in under it (both models).
 blockers. `Engine.create(canvas, { warm })` warms the builds a game will use at once (by default the plain and
 the cone light passes); `E.warm` takes `night`, `floor`, `twoLayer` and `post` too. `?night=1` in the demo.
 
+### Quality above the default
+
+`opt.quality` (all optional) turns the picture up past the engine's usual look, for desktop GPUs; a game maps
+its own presets onto it. With none of it set, nothing changes.
+
+| Knob | What it does |
+| --- | --- |
+| `ss: 1.5` or `2` | Supersampling: the picture is drawn at 1.5 or 2 times the canvas and filtered down (four smoothed taps a canvas pixel, exactly a 2 x 2 box at 2); `opt.scale` is then ignored |
+| `shadow: 2` | A finer shadow walk, for the sun and the moon: twice the steps, each half as long, the same reach |
+| `shadowReach: 1.5` | Shadows that go further (more steps, same length) |
+| `shadowSoft: 1.3` | A wider penumbra |
+| `aoDirs: 16`, `aoRadius: 1.4` | Occlusion: more directions (8 by day, 6 at night, up to 16), looking further |
+| `occSteps: 16` | Lamps that are occluded test more points between the light and the pixel (8, up to 32) |
+| `beamSteps: 32` | Cone beams marched in more steps (12, up to 64): smoother shafts |
+| `fxRes: 2` | Bloom and the depth of field at half the picture's size instead of a quarter, with an extra blur pass: smoother glow and bokeh at high resolution |
+
+Contact shadows (night) now go up to 32. The height fog is integrated exactly, so it has no steps to raise.
+
+What each costs, alone, at night on the street view with the convoy's lamps and headlamps (`?night=1&horde=9&lights=18&cones=9`),
+on an RTX 5090, milliseconds a frame:
+
+| Knob | 1920 x 1080 canvas | 2560 x 1440 canvas |
+| --- | ---: | ---: |
+| (none) | 2.06 | 3.08 |
+| ss 1.5 | 3.52 | 5.69 |
+| ss 2 | 5.12 | 8.50 |
+| shadow 2 | 2.32 | 3.41 |
+| shadowReach 1.5 | 2.08 | 3.71 |
+| aoDirs 16 | 2.11 | 3.73 |
+| aoRadius 1.5 | 2.09 | 3.59 |
+| occSteps 16 | 2.14 | 4.10 |
+| beamSteps 32 | 2.50 | 4.16 |
+| fxRes 2 | 2.24 | 3.36 |
+| all of them | 6.91 | 11.51 |
+
+By day on the street (no lamps or cones), all of them together cost 4.95 ms at 1080p and 6.73 ms at 1440p,
+against 1.83 and 2.58. Supersampling is most of it: it is paid per pixel, so twice the canvas is four times
+the light pass. In the demo: `?ss=2`, `?shadowq=2`, `?reach=1.5`, `?soft=1.3`, `?aodirs=16`, `?aor=1.4`,
+`?occq=16`, `?beamq=32`, `?fxres=2`, or `?ultra=1` for all of them (add `&fullres=1` on a large screen, so the
+demo does not cap the resolution). Any canvas size works, 1440p and 4K included; the demo keeps native under
+about 2.6 million pixels unless told otherwise, the engine itself does not.
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.

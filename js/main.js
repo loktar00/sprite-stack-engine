@@ -35,6 +35,10 @@
   const UNIT = Q.has('unit') ? parseFloat(Q.get('unit')) || 1 : 1;
   // ?night=1: the village by a low moon, through the night light model, with the film post (tone curve, grade,
   // tilt-shift depth of field, grain)
+  // opt.quality from the address (see the README's quality table): ?ss=1.5|2 ?shadowq=2 ?reach=1.5 ?soft=1.5 ?aodirs=16
+  // ?aor=1.5 ?occq=16 ?beamq=32 ?fxres=2, or ?ultra=1 for all of them at once
+  const QUALITY = Q.has('ultra') ? { ss: 2, shadow: 2, shadowReach: 1.5, shadowSoft: 1.3, aoDirs: 16, aoRadius: 1.4, occSteps: 16, beamSteps: 32, fxRes: 2 }
+    : { ss: num('ss', 1), shadow: num('shadowq', 1), shadowReach: num('reach', 1), shadowSoft: num('soft', 1), aoDirs: num('aodirs', 0), aoRadius: num('aor', 1), occSteps: num('occq', 8), beamSteps: num('beamq', 12), fxRes: num('fxres', 4) };
   const NIGHT = Q.has('night'), mEl = 0.42, mAz = Math.atan2(-0.6, 0.8);
   const NIGHT_LIGHT = { model: 'night', moon: [Math.cos(mEl) * Math.cos(mAz), Math.cos(mEl) * Math.sin(mAz), Math.sin(mEl)], moonCol: [0.92, 1.12, 1.55], skyCol: [0.075, 0.115, 0.19],
     earthCol: [0.035, 0.032, 0.03], fogCol: [0.032, 0.052, 0.088], fog: [0.0025, 0.03, 0.08], emissive: 3.5, fogNear: 120, rim: 0.9, rimWarm: 0.05, floorCol: [0.07, 0.065, 0.05] };
@@ -436,6 +440,7 @@
     const RO = { cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
       shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
       cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0, horde: BOTS && !BOTSOBJ ? flock : null, hdr: Q.has('hdr'), rings: rings, lightMapScale: env.glow };      // ?hdr=1: the half-float picture (see the README)
+    RO.quality = QUALITY;
     if (NIGHT) {      // ?night=1: the night model and the film post (see the README); the lanterns are lit, the soldiers get contact shadows
       RO.light = NIGHT_LIGHT; RO.lampCap = 0.55; RO.post = { bloom: 0.4, vignette: 0.42, grain: 0.012, exposure: 1.8, grade: [0.26, 0.012, 1.16, 1], knee: 1.6, dof: [cam.mode === 'persp' ? cam.dist : 600, cam.mode === 'persp' ? cam.dist * 0.6 : 400, 0.5, 0.35] };
       RO.contacts = walkers.slice(0, 8).map(function (k) { const P = Rig.pose(k.rig); return [P.x * SCALE, P.y * SCALE, 4.5, 0.5]; });
@@ -452,7 +457,7 @@
   function fit() {
     const d = window.devicePixelRatio || 1; canvas.width = Math.round(window.innerWidth * d); canvas.height = Math.round(window.innerHeight * d);
     scale = S.res ? Math.max(1, Math.floor(canvas.height / S.res)) : 1;
-    while (canvas.width * canvas.height / (scale * scale) > 2.6e6) scale++;
+    if (!Q.has("fullres")) while (canvas.width * canvas.height / (scale * scale) > 2.6e6) scale++;      // (?fullres=1: no cap, to measure)
   }
   function showHud(ms) {
     const s = E.stats, f1 = function (v) { return v === null || v === undefined ? '-' : v.toFixed(v < 10 ? 2 : 1); }, th = function (v) { return String(v).replace(/\B(?=(\d{3})+$)/g, ','); };

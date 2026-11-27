@@ -29,7 +29,7 @@
   const FL = 12;                      // floats per instance: pos 3, rot 1, rect 4 (the fade rides in its first: see a_rectf), offset 2, scale 1, box height 1 (voxel mode)
   const NB = 2048, ZQ = 16;           // height buckets, and buckets per unit of height
   const HMAX = 128;                   // tallest thing the G-buffer and the height map can hold
-  const LIGHTS = 256, CONES = 16, BINS = 64, RINGS = 8, BLOBS = 24, STEPS = 48, REACH = 195;     // point lights, cone lights, bins per cone in its shadow table
+  const LIGHTS = 256, CONES = 16, BINS = 64, RINGS = 8, BLOBS = 24, STEPS = 48, REACH = 195, CONTACTS = 32;     // point lights, cone lights, bins per cone in its shadow table
   const ANGLES = 32, IMP_W = 4096, IMP_H = 2048, IMP_PPU = 3, IL = 15;      // impostors: views per stack, their atlas, its pixels per unit, floats per sprite
 
   // ---------------------------------------------------------------- small matrix helpers (column-major 4x4)
@@ -300,6 +300,7 @@
   #define FILM_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
   uniform float u_falloff;    // 0: the lamps fall off as (1 - r / reach)^2; 1: windowed and steep near the source (opt.falloff)
+  uniform vec4 u_qual;        // opt.quality: steps of a lamp's occlusion test, beam steps, the shadow walk's step scale, occlusion radius scale
   #if RINGS_ON
   uniform vec4 u_ring[${RINGS}], u_ringCol[${RINGS}]; uniform float u_ringGlow[${RINGS}]; uniform int u_nr;     // rings: x y z radius / r g b width / the band's own glow
   #endif
@@ -405,7 +406,7 @@
       if (u_falloff > 0.5) { float x = r * r / (L.w * L.w), win = (1.0 - x) * (1.0 - x); att = sqrt(win * win / (1.0 + r * r / max(L.w * L.w * 0.02, 1e-4))); }      // (squared below)
       if (C.w > 0.5) {
         vec3 q = p + vec3(n.xy * (3.5 * u_hmK.z), 1.3 * u_hmK.z), e = L.xyz - q;   // start off the surface, as the sun's walk does
-        for (int k = 1; k < 8; k++) { vec3 s = q + e * (float(k) / 8.0); occ = min(occ, clamp((s.z - land(s.xy)) * 0.5 / u_hmK.z + 0.5, 0.0, 1.0)); }
+        for (int k = 1; k < 32; k++) { if (float(k) >= u_qual.x) break; vec3 s = q + e * (float(k) / u_qual.x); occ = min(occ, clamp((s.z - land(s.xy)) * 0.5 / u_hmK.z + 0.5, 0.0, 1.0)); }
       }
       irr += C.rgb * att * att * occ * (0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0));
     }
@@ -470,8 +471,8 @@
       vec3 q = p + vec3(n.xy * (3.5 * U), 1.3 * U);           // start off the surface (and clear of the eaves)
       // (every art pixel takes steps of a slightly different length, which turns the banding of a coarse walk into
       // a fine dither that stays put on the ground)
-      float d = 0.0, ds = 1.3 * U, jit = 0.78 + 0.44 * hash(floor(p.xy / U) + floor(p.z / U) * 7.31);
-      for (int i = 0; i < ${STEPS}; i++) {
+      float d = 0.0, ds = 1.3 * U * u_qual.z, jit = 0.78 + 0.44 * hash(floor(p.xy / U) + floor(p.z / U) * 7.31);
+      for (int i = 0; i < 160; i++) {
         if (float(i) >= u_walk.x) break;
         d += ds * jit; ds = min(ds * u_walk.y, u_walk.z);
         vec3 s = q + u_sun * d;
@@ -499,12 +500,12 @@
     // the sky. Walls are sampled out in front of themselves, and darken a little towards their foot (contact).
     float ao = 1.0;
     if (u_fx.y > 0.0) {
-      vec2 c0 = p.xy + n.xy * (3.0 * U); float occ = 0.0;
-      for (int i = 0; i < 8; i++) {
+      vec2 c0 = p.xy + n.xy * (3.0 * U); float occ = 0.0, UR = U * u_qual.w;
+      for (int i = 0; i < 16; i++) {
         if (float(i) >= u_dirs) break;
         float an = float(i) * 6.2832 / u_dirs + 0.4; vec2 dir = vec2(cos(an), sin(an));
-        if (u_dirs > 4.5) occ += clamp((land(c0 + dir * (2.5 * U)) - p.z - U) / (2.5 * U), 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * (7.5 * U)) - p.z - U) / (7.5 * U), 0.0, 1.0) * 0.45;
-        else occ += clamp((land(c0 + dir * (4.5 * U)) - p.z - U) / (4.5 * U), 0.0, 1.0);
+        if (u_dirs > 4.5) occ += clamp((land(c0 + dir * (2.5 * UR)) - p.z - U) / (2.5 * UR), 0.0, 1.0) * 0.55 + clamp((land(c0 + dir * (7.5 * UR)) - p.z - U) / (7.5 * UR), 0.0, 1.0) * 0.45;
+        else occ += clamp((land(c0 + dir * (4.5 * UR)) - p.z - U) / (4.5 * UR), 0.0, 1.0);
       }
       ao = 1.0 - occ / u_dirs;
       if (n.z < 0.6) ao *= mix(0.68, 1.0, smoothstep(0.0, 7.0 * U, p.z - land(p.xy + n.xy * (4.5 * U))));
@@ -556,8 +557,8 @@
         if (disc > 0.0) {
           float sq = sqrt(disc), t0 = max(-bq - sq, 0.0), t1 = min(-bq + sq, dist);
           if (t1 > t0) {
-            float ds = (t1 - t0) / 12.0, jit = hash(vec2(px) + float(k) * 13.7), acc = 0.0;
-            for (int i = 0; i < 12; i++) { float sd; vec3 s = u_eye + ray * (t0 + (float(i) + jit) * ds); float sp = spotOf(S, D, s, sd); if (sp > 0.0) acc += sp * coneShadow(k, S, X, s); }
+            float ds = (t1 - t0) / u_qual.y, jit = hash(vec2(px) + float(k) * 13.7), acc = 0.0;
+            for (int i = 0; i < 64; i++) { if (float(i) >= u_qual.y) break; float sd; vec3 s = u_eye + ray * (t0 + (float(i) + jit) * ds); float sp = spotOf(S, D, s, sd); if (sp > 0.0) acc += sp * coneShadow(k, S, X, s); }
             beam += K.rgb * K.w * acc * ds / max(S.w, 0.01);
           }
         }
@@ -667,7 +668,9 @@
   uniform vec3 u_hmK;         // world height per step of a byte, the highest it can hold less a margin, opt.unit
   uniform vec4 u_q;           // moon shadow steps (0: none), occlusion on, beams on, glow strength
   uniform vec4 u_look;        // the haze starts this far from the eye, rim strength, (free), the warm lights' share of the rim
-  uniform vec4 u_contact[8]; uniform int u_ncontact;     // contact shadows: x, y, radius, strength
+  uniform vec4 u_contact[${CONTACTS}]; uniform int u_ncontact;     // contact shadows: x, y, radius, strength
+  uniform vec4 u_qual;        // opt.quality: steps of a lamp's occlusion test, beam steps, the moon walk's step scale, occlusion radius scale
+  uniform vec4 u_qual2;       // the moon walk's growth per step, occlusion directions, penumbra scale
   uniform float u_time, u_ground;
   in vec2 v_uv; out vec4 o;
 
@@ -744,7 +747,7 @@
       else { float a = 1.0 - r / L.w; att = a * a; }
       float lam = u_falloff > 0.5 ? 0.22 + 0.78 * max(dot(n, d3 / max(r, 0.001)), 0.0) : 0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0);
       float occ = 1.0;
-      if (C.w > 0.5 && r > 0.4 * KM) { for (int k = 1; k < 8; k++) { vec3 s = p + d3 * (float(k) / 8.0); occ = min(occ, clamp(clearOf(s) * 2.5 / KM + 0.35, 0.0, 1.0)); } }
+      if (C.w > 0.5 && r > 0.4 * KM) { for (int k = 1; k < 32; k++) { if (float(k) >= u_qual.x) break; vec3 s = p + d3 * (float(k) / u_qual.x); occ = min(occ, clamp(clearOf(s) * 2.5 / KM + 0.35, 0.0, 1.0)); } }
       irr += C.rgb * att * lam * occ; warm += C.rgb * att * occ;
       if (wet > 0.0) { vec3 hv = normalize(d3 / max(r, 0.001) - ray); spec += C.rgb * att * occ * pow(max(dot(n, hv), 0.0001), wet > 0.5 ? 70.0 : 18.0) * (wet > 0.5 ? 0.8 : 0.5 * wet); }
     }
@@ -802,13 +805,13 @@
     float sh = 1.0;
     if (u_q.x > 0.0) {
       vec3 q = p + n * (0.06 * KM) + vec3(0.0, 0.0, 0.04 * KM);
-      float d = 0.0, ds = 0.12 * KM;
-      for (int i = 0; i < 48; i++) {
+      float d = 0.0, ds = 0.12 * KM * u_qual.z;
+      for (int i = 0; i < 160; i++) {
         if (float(i) >= u_q.x) break;
-        d += ds; ds = min(ds * 1.13, KM);
+        d += ds; ds = min(ds * u_qual2.x, KM * u_qual.z);
         vec3 s = q + u_moon * d;
         if (s.z > u_hmK.y) break;
-        sh = min(sh, clamp(clearOf(s) / (0.11 * d + 0.05 * KM), 0.0, 1.0));
+        sh = min(sh, clamp(clearOf(s) / ((0.11 * d + 0.05 * KM) * u_qual2.z), 0.0, 1.0));
         if (sh <= 0.0) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
@@ -816,16 +819,17 @@
     // occlusion: land that rises close round the pixel takes sky away; land overhead (a canopy) takes some too
     float ao = 1.0;
     if (u_q.y > 0.0) {
-      vec2 c0 = p.xy + n.xy * (0.3 * KM); float occ = 0.0;
-      for (int i = 0; i < 6; i++) {
-        float an = float(i) * 1.0472 + 0.3; vec2 dir = vec2(cos(an), sin(an));
-        occ += clamp((hm(c0 + dir * (0.6 * KM)).x - p.z - 0.1 * KM) / (0.6 * KM), 0.0, 1.0) * 0.55 + clamp((hm(c0 + dir * (2.0 * KM)).x - p.z - 0.2 * KM) / (2.0 * KM), 0.0, 1.0) * 0.45;
+      vec2 c0 = p.xy + n.xy * (0.3 * KM); float occ = 0.0, KR = KM * u_qual.w;
+      for (int i = 0; i < 16; i++) {
+        if (float(i) >= u_qual2.y) break;
+        float an = float(i) * 6.2832 / u_qual2.y + 0.3; vec2 dir = vec2(cos(an), sin(an));
+        occ += clamp((hm(c0 + dir * (0.6 * KR)).x - p.z - 0.1 * KM) / (0.6 * KR), 0.0, 1.0) * 0.55 + clamp((hm(c0 + dir * (2.0 * KR)).x - p.z - 0.2 * KM) / (2.0 * KR), 0.0, 1.0) * 0.45;
       }
       vec2 over = hm(p.xy); float canopy = over.y > p.z + KM ? 0.35 : 0.0;
-      ao = clamp(1.0 - occ / 6.0 - canopy, 0.25, 1.0);
+      ao = clamp(1.0 - occ / u_qual2.y - canopy, 0.25, 1.0);
     }
     // contact shadows under figures the height map does not hold
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < ${CONTACTS}; i++) {
       if (i >= u_ncontact) break;
       vec4 C = u_contact[i];
       if (C.w > 0.0 && p.z < u_ground + 0.25 * KM) { float cd = length((p.xy - C.xy) * vec2(1.0, 1.25)), ck = C.w * (1.0 - smoothstep(C.z * 0.25, max(C.z, 1e-3), cd)); sh *= 1.0 - ck; ao *= 1.0 - ck * 0.7; }
@@ -875,8 +879,8 @@
         if (disc > 0.0) {
           float sq = sqrt(disc), t0 = max(-bq - sq, 0.0), t1 = min(-bq + sq, dist);
           if (t1 > t0) {
-            float ds = (t1 - t0) / 12.0, jit = hash(vec2(px) + float(k) * 13.7); vec3 acc = vec3(0.0);
-            for (int i = 0; i < 12; i++) { float sd; vec3 s = u_eye + ray * (t0 + (float(i) + jit) * ds); float sp = spotOf(S, D, s, sd); if (sp > 0.0) acc += vec3(sp * fogAt(s.z) * coneShadow(k, S, X, s) / (1.0 + sd * 0.05 / KM)); }
+            float ds = (t1 - t0) / u_qual.y, jit = hash(vec2(px) + float(k) * 13.7); vec3 acc = vec3(0.0);
+            for (int i = 0; i < 64; i++) { if (float(i) >= u_qual.y) break; float sd; vec3 s = u_eye + ray * (t0 + (float(i) + jit) * ds); float sp = spotOf(S, D, s, sd); if (sp > 0.0) acc += vec3(sp * fogAt(s.z) * coneShadow(k, S, X, s) / (1.0 + sd * 0.05 / KM)); }
             beam += K.rgb * K.w * acc * ds * 3.6;
           }
         }
@@ -984,12 +988,14 @@
   uniform vec4 u_focus;        // focus distance, its depth, the screen row of the tilt-shift band (0..1, below 0: none), strength
   uniform vec4 u_grade;        // contrast, black level, saturation, shadow blue
   uniform float u_time;
+  uniform vec3 u_ss;          // supersampling: on, and a quarter of a canvas pixel in uv (see FS_POST)
   in vec2 v_uv; out vec4 o;
   ${SCRUB}
   float hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
   void main() {
     ivec2 ip = ivec2(min(v_uv * u_size, u_size - 1.0));
     vec4 s = texelFetch(u_tex, ip, 0); vec3 c = scrub(s.rgb);
+    if (u_ss.x > 0.5) c = (scrub(texture(u_tex, v_uv + vec2(-u_ss.y, -u_ss.z)).rgb) + scrub(texture(u_tex, v_uv + vec2(u_ss.y, -u_ss.z)).rgb) + scrub(texture(u_tex, v_uv + vec2(-u_ss.y, u_ss.z)).rgb) + scrub(texture(u_tex, v_uv + vec2(u_ss.y, u_ss.z)).rgb)) * 0.25;
     vec2 cuv = (vec2(ip) + 0.5) / u_size;
     float dz = abs(s.a - u_focus.x) / max(u_focus.y, 0.1), ty = u_focus.z < 0.0 ? 0.0 : abs(cuv.y - u_focus.z);
     float coc = clamp(max(smoothstep(0.6, 2.2, dz), smoothstep(0.3, 0.68, ty) * 0.75) * u_focus.w, 0.0, 1.0);
@@ -1022,18 +1028,25 @@
   #define HDR_ON 0
   uniform sampler2D u_tex, u_bloom; uniform vec2 u_size; uniform vec2 u_k;      // u_k: bloom strength, vignette strength
   uniform float u_exp;        // HDR: the exposure (the light pass's tone curve and grade, applied here instead)
+  uniform vec3 u_ss;          // supersampling (opt.quality.ss): on, and a quarter of a canvas pixel in uv
   in vec2 v_uv; out vec4 o;
   ${SCRUB}
+  // the picture at this canvas pixel: the nearest internal pixel, or (supersampled) four smoothed taps a quarter of a
+  // canvas pixel either way, which for twice the canvas is exactly the 2 x 2 internal pixels under it
+  vec3 lit() {
+    if (u_ss.x < 0.5) return texelFetch(u_tex, ivec2(min(v_uv * u_size, u_size - 1.0)), 0).rgb;
+    return (texture(u_tex, v_uv + vec2(-u_ss.y, -u_ss.z)).rgb + texture(u_tex, v_uv + vec2(u_ss.y, -u_ss.z)).rgb + texture(u_tex, v_uv + vec2(-u_ss.y, u_ss.z)).rgb + texture(u_tex, v_uv + vec2(u_ss.y, u_ss.z)).rgb) * 0.25;
+  }
   void main() {
 #if HDR_ON
-    vec3 c = scrub(texelFetch(u_tex, ivec2(min(v_uv * u_size, u_size - 1.0)), 0).rgb) + scrub(texture(u_bloom, v_uv).rgb) * u_k.x;
+    vec3 c = scrub(lit()) + scrub(texture(u_bloom, v_uv).rgb) * u_k.x;
     c = 1.0 - exp(-pow(max(c * u_exp, 0.0), vec3(1.25)) * 1.7);
     float l = dot(c, vec3(0.299, 0.587, 0.114));
     c = mix(vec3(l), c, 1.16);
     c += vec3(0.022, 0.006, -0.022) * smoothstep(0.4, 1.0, l) + vec3(-0.014, 0.0, 0.022) * (1.0 - smoothstep(0.0, 0.45, l));
     c = clamp(c, 0.0, 1.0);
 #else
-    vec3 c = texelFetch(u_tex, ivec2(min(v_uv * u_size, u_size - 1.0)), 0).rgb;  // the nearest internal pixel: no smoothing
+    vec3 c = lit();                                          // the nearest internal pixel: no smoothing (unless supersampled)
     vec3 b = min(texture(u_bloom, v_uv).rgb * u_k.x, 1.0);
     c = 1.0 - (1.0 - c) * (1.0 - b);
 #endif
@@ -1125,8 +1138,9 @@
       for (let i = 0; i < 2; i++) { t.dof[i] = texture(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR); t.fboDof[i] = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, t.fboDof[i]); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t.dof[i], 0); }
       return (hdr = t);
     }
-    function targets(w, h) {
-      if (w === iw && h === ih) return; iw = w; ih = h; bw = Math.max(1, w >> 2); bh = Math.max(1, h >> 2); hdr = null;
+    let fxShift = 2;      // bloom and the depth of field at a quarter (2) or a half (1) of the internal size (opt.quality.fxRes)
+    function targets(w, h, shift) {
+      if (w === iw && h === ih && shift === fxShift) return; iw = w; ih = h; fxShift = shift; bw = Math.max(1, w >> shift); bh = Math.max(1, h >> shift); hdr = null;
       g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
       countTex = floatOK ? texture(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT) : texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
       depth = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, depth); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
@@ -1264,7 +1278,7 @@
     // Uint8Array or null (the palette row: a hit flash, a unit powered down). Each
     // unit goes through the same culling and instance writing as an item (one scratch item, reused).
     const moved = { dx: 0.5, dy: 0.5, dz: 0.5, rot: 0.5, scale: 1.5 };      // (fractions from the start: see SHAPES)
-    const lift = new Float32Array(RINGS * 7), NOHORDE = [], unit = newItem();
+    const lift = new Float32Array(RINGS * 7), NOHORDE = [], NOQ = {}, unit = newItem();
     function build(list, M, opt) {
       const ppuOrtho = ih / (2 * opt.cam.dist * M.th), vp = M.vp, voxel = !!opt.voxel, U = opt.unit || 1, zq = ZQ;      // zq: height buckets per world unit (2048 of them: 128 units)
       let n = 0, slices = 0, tallest = 0;
@@ -1444,8 +1458,15 @@
       const t0 = performance.now(), W = canvas.width, H = canvas.height, env = opt.light;
       // the picture is drawn at 1 / scale of the canvas (scale: a whole number) and shown scale times larger, each
       // internal pixel a clean square, centred, with a thin bar where the canvas does not divide evenly
-      const scale = Math.max(1, Math.round(opt.scale));
-      targets(Math.max(1, Math.floor(W / scale)), Math.max(1, Math.floor(H / scale)));
+      // opt.quality (all optional; the defaults are the engine's usual look and cost):
+      //   ss          supersampling: the picture drawn at ss times the canvas (1.5 or 2) and filtered down; scale is ignored
+      //   shadow      how much finer the shadow walk is: steps times this, each that much shorter (1; 2 is twice as fine)
+      //   shadowReach how much further it goes (1), shadowSoft how much wider the penumbra (1)
+      //   aoDirs      occlusion directions (8 by day, 6 at night; up to 16), aoRadius how far they look (1)
+      //   occSteps    steps of a lamp's occlusion test (8; up to 32), beamSteps a cone beam's steps (12; up to 64)
+      //   fxRes       bloom and the depth of field at a quarter (4) or half (2) of the picture's size
+      const Q = opt.quality || NOQ, ss = Q.ss > 1 ? Math.min(2, Q.ss) : 0, scale = ss ? 1 : Math.max(1, Math.round(opt.scale)), fxh = Q.fxRes === 2 ? 1 : 2;
+      targets(ss ? Math.round(W * ss) : Math.max(1, Math.floor(W / scale)), ss ? Math.round(H * ss) : Math.max(1, Math.floor(H / scale)), fxh);
       const U = opt.unit || 1, M = cameraMatrices(opt.cam, iw / ih, U), n = build(opt.list, M, opt);
       if (timerExt && !query) { query = gl.createQuery(); gl.beginQuery(timerExt.TIME_ELAPSED_EXT, query); timing = true; }
       gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst.subarray(0, n * FL), gl.DYNAMIC_DRAW);
@@ -1496,6 +1517,8 @@
       if (gmTex) { gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, gmTex); gl.uniform1i(u.u_gm, 8); gl.uniform4fv(u.u_gmBox, gmBox); }
       if (lmTex) { gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, lmTex); gl.uniform1i(u.u_lm, 9); gl.uniform4fv(u.u_lmBox, lmBox); gl.uniform1f(u.u_lmK, lmK * (opt.lightMapScale !== undefined ? opt.lightMapScale : 1)); }
       gl.uniform1f(u.u_falloff, (opt.falloff || (night ? 'window' : 'linear')) === 'window' ? 1 : 0);
+      const qf = Math.max(0.25, Q.shadow || 1), qr = Q.shadowReach || 1;
+      gl.uniform4f(u.u_qual, Math.max(2, Math.min(32, Q.occSteps || 8)), Math.max(2, Math.min(64, Q.beamSteps || 12)), 1 / qf, Q.aoRadius || 1);
       if (night) {
         // THE NIGHT MODEL's own uniforms (see FS_NIGHT); light: { model: 'night', moon, moonCol, skyCol, earthCol,
         // fogCol, fog: [density, thinning, moon in the haze], fogNear, rim, rimWarm, emissive, floorCol, floor (GLSL),
@@ -1506,9 +1529,10 @@
         gl.uniform3fv(u.u_fogCol, env.fogCol || [0, 0, 0]); gl.uniform3fv(u.u_floorCol, env.floorCol || [0.1, 0.09, 0.08]);
         gl.uniform4f(u.u_fog, fg[0], fg[1], fg[2] || 0, 0); gl.uniform1f(u.u_time, opt.time || 0); gl.uniform1f(u.u_ground, opt.ground || 0);
         gl.uniform4fv(u.u_hmBox, hmBox); gl.uniform3f(u.u_hmK, 255 * hmStep, 255 * hmStep - 0.875 * U * 10, U);
-        gl.uniform4f(u.u_q, opt.shadows ? (opt.cheap ? 22 : 48) : 0, opt.ao ? 1 : 0, opt.beams === false ? 0 : 1, env.emissive !== undefined ? env.emissive : 3);
+        gl.uniform4f(u.u_q, opt.shadows ? Math.min(160, Math.round((opt.cheap ? 22 : 48) * qf * qr)) : 0, opt.ao ? 1 : 0, opt.beams === false ? 0 : 1, env.emissive !== undefined ? env.emissive : 3);
+        gl.uniform4f(u.u_qual2, Math.pow(1.13, 1 / qf), Math.max(1, Math.min(16, Q.aoDirs || 6)), Q.shadowSoft || 1, 0);
         gl.uniform4f(u.u_look, env.fogNear || 0, env.rim || 0, 0, env.rimWarm || 0);
-        const CT = opt.contacts || [], nc = Math.min(8, CT.length), cv = new Float32Array(32); for (let i = 0; i < nc; i++) cv.set(CT[i].slice(0, 4), i * 4);
+        const CT = opt.contacts || [], nc = Math.min(CONTACTS, CT.length), cv = new Float32Array(CONTACTS * 4); for (let i = 0; i < nc; i++) cv.set(CT[i].slice(0, 4), i * 4);
         gl.uniform4fv(u.u_contact, cv); gl.uniform1i(u.u_ncontact, nc);
         if (env.floor) { const fp = new Float32Array(32); (env.floorParams || []).slice(0, 8).forEach(function (v, i) { fp.set(v.slice(0, 4), i * 4); }); gl.uniform4fv(u.u_floor, fp); if (env.floorUniforms) env.floorUniforms(gl, u); }
       } else {
@@ -1518,13 +1542,14 @@
       gl.uniform4f(u.u_hh, env.hazeH ? env.hazeH[0] : 0, env.hazeH ? env.hazeH[1] : 0, 0, 0);
       // the shadow's softness follows the sun: its edge is wider on the ground when the light comes in low
       // (env.soft, if given, sets it instead: near 0 for a hard light from far away)
-      gl.uniform4f(u.u_fx, opt.shadows ? (env.soft !== undefined ? Math.max(0.001, env.soft) : 0.1 * sun[2] + 0.012) : 0, opt.ao ? 0.9 : 0, env.glow, opt.shadows ? env.cloud || 0 : 0);
+      gl.uniform4f(u.u_fx, opt.shadows ? (env.soft !== undefined ? Math.max(0.001, env.soft) : 0.1 * sun[2] + 0.012) * (Q.shadowSoft || 1) : 0, opt.ao ? 0.9 : 0, env.glow, opt.shadows ? env.cloud || 0 : 0);
       // the sun's direction as it lies on the screen, two pixels long (for the rim)
       const sx = M.r[0] * sun[0] + M.r[1] * sun[1], sy = M.u[0] * sun[0] + M.u[1] * sun[1] + M.u[2] * sun[2], sl = Math.hypot(sx, sy) || 1;
       gl.uniform4f(u.u_view, sx / sl * 2, sy / sl * 2, M.back - 140 * U, 760 * U);
       gl.uniform4f(u.u_tone, env.exposure, env.hazeK, M.ortho ? 0 : 1, 0);
       // the full walk: ${STEPS} steps to ${REACH} units, 16 occlusion samples. cheap: 14 longer steps to 90 units, 4 samples
-      if (opt.cheap) { gl.uniform4f(u.u_walk, 14, 1.22, 9 * U, 90 * U); gl.uniform1f(u.u_dirs, 4); } else { gl.uniform4f(u.u_walk, STEPS, 1.09, 4.6 * U, REACH * U); gl.uniform1f(u.u_dirs, 8); } gl.uniform1f(u.u_water, opt.water || -9);
+      if (opt.cheap) { gl.uniform4f(u.u_walk, Math.min(160, Math.round(14 * qf * qr)), Math.pow(1.22, 1 / qf), 9 * U / qf, 90 * U * qr); gl.uniform1f(u.u_dirs, Q.aoDirs ? Math.min(16, Q.aoDirs) : 4); }
+      else { gl.uniform4f(u.u_walk, Math.min(160, Math.round(STEPS * qf * qr)), Math.pow(1.09, 1 / qf), 4.6 * U / qf, REACH * U * qr); gl.uniform1f(u.u_dirs, Q.aoDirs ? Math.min(16, Q.aoDirs) : 8); } gl.uniform1f(u.u_water, opt.water || -9);
       }
       const blobs = new Float32Array(BLOBS * 4), low = new Float32Array(BLOBS), B = opt.blobs || [];
       B.slice(0, BLOBS).forEach(function (b, i) { blobs.set(b.slice(0, 4), i * 4); low[i] = b[4]; });
@@ -1553,7 +1578,7 @@
       if (opt.bloom && !opt.heat) {
         const pb = film ? variant('knee', VS_FULL, FS_KNEE, []) : HD ? variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']) : pBright;
         pass(blF[0], bw, bh, pb, litT); gl.uniform2f(pb.u.u_px, 1 / iw, 1 / ih); gl.uniform1f(pb.u.u_knee, knee); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        [[1.2, 0], [0, 1.2], [2.6, 0], [0, 2.6]].forEach(function (s, i) { pass(blF[1 - (i & 1)], bw, bh, pBlur, bl[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+        (fxh === 1 ? [[1.2, 0], [0, 1.2], [2.4, 0], [0, 2.4], [5.2, 0], [0, 5.2]] : [[1.2, 0], [0, 1.2], [2.6, 0], [0, 2.6]]).forEach(function (s, i) { pass(blF[1 - (i & 1)], bw, bh, pBlur, bl[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
       }
 
       // the depth of field's soft copy: the whole picture at a quarter, blurred
@@ -1561,11 +1586,11 @@
       if (dof) {
         const pd = variant('down', VS_FULL, FS_DOWN, []);
         pass(HD.fboDof[0], bw, bh, pd, litT); gl.uniform2f(pd.u.u_px, 1 / iw, 1 / ih); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        [[1, 0], [0, 1]].forEach(function (s, i) { pass(HD.fboDof[1 - (i & 1)], bw, bh, pBlur, HD.dof[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+        (fxh === 1 ? [[1, 0], [0, 1], [2, 0], [0, 2]] : [[1, 0], [0, 1]]).forEach(function (s, i) { pass(HD.fboDof[1 - (i & 1)], bw, bh, pBlur, HD.dof[i & 1]); gl.uniform2f(pBlur.u.u_step, s[0] / bw, s[1] / bh); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
       }
       // to the canvas: the lit picture with its bloom, or the overdraw heat map, scaled up without smoothing
       gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.viewport((W - iw * scale) >> 1, (H - ih * scale) >> 1, iw * scale, ih * scale); gl.activeTexture(gl.TEXTURE0);
+      if (ss) gl.viewport(0, 0, W, H); else gl.viewport((W - iw * scale) >> 1, (H - ih * scale) >> 1, iw * scale, ih * scale); gl.activeTexture(gl.TEXTURE0);
       if (opt.heat) { gl.useProgram(pHeat.p); gl.bindTexture(gl.TEXTURE_2D, countTex); gl.uniform1i(pHeat.u.u_count, 0); gl.uniform1i(pHeat.u.u_channel, opt.heat - 1); gl.uniform1f(pHeat.u.u_unit, UNIT); }
       else if (film) {
         const pp = variant('film', VS_FULL, FS_FILM, []), gr = PO.grade || [0, 0, 1.12, 1], fo = PO.dof || [30, 12, -1, 0];
@@ -1574,12 +1599,12 @@
         gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, HD.dof[0]); gl.uniform1i(pp.u.u_dof, 2);
         gl.uniform2f(pp.u.u_size, iw, ih);
         gl.uniform4f(pp.u.u_k, opt.bloom ? (PO.bloom !== undefined ? PO.bloom : 0.6) : 0, PO.vignette !== undefined ? PO.vignette : 0.35, PO.grain || 0, PO.exposure || env.exposure || 1);
-        gl.uniform4f(pp.u.u_focus, fo[0], fo[1], fo[2], dof ? fo[3] : 0); gl.uniform4fv(pp.u.u_grade, gr); gl.uniform1f(pp.u.u_time, opt.time || 0);
+        gl.uniform4f(pp.u.u_focus, fo[0], fo[1], fo[2], dof ? fo[3] : 0); gl.uniform4fv(pp.u.u_grade, gr); gl.uniform1f(pp.u.u_time, opt.time || 0); gl.uniform3f(pp.u.u_ss, ss ? 1 : 0, 0.25 / W, 0.25 / H);
       }
       else {
         const pp = HD ? variant('ph', VS_FULL, FS_POST, ['HDR_ON']) : pPost;
         gl.useProgram(pp.p); gl.bindTexture(gl.TEXTURE_2D, litT); gl.uniform1i(pp.u.u_tex, 0); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bl[0]); gl.uniform1i(pp.u.u_bloom, 1);
-        gl.uniform2f(pp.u.u_size, iw, ih); gl.uniform2f(pp.u.u_k, opt.bloom ? 0.55 + 0.75 * env.glow : 0, 0.22); if (HD) gl.uniform1f(pp.u.u_exp, env.exposure);
+        gl.uniform2f(pp.u.u_size, iw, ih); gl.uniform2f(pp.u.u_k, opt.bloom ? 0.55 + 0.75 * env.glow : 0, 0.22); if (HD) gl.uniform1f(pp.u.u_exp, env.exposure); gl.uniform3f(pp.u.u_ss, ss ? 1 : 0, 0.25 / W, 0.25 / H);
       }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
