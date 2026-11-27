@@ -711,6 +711,11 @@
       if (!variants[key]) { let src = fs; on.forEach(function (d) { src = src.split('#define ' + d + ' 0').join('#define ' + d + ' 1'); }); variants[key] = program(vs, src); }
       return variants[key];
     }
+    // the light pass for a set of features
+    function lightProgram(cones, rows, ground, lightMap, hdr, rings) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : []);
+      return on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight;
+    }
     const pBright = program(VS_FULL, FS_BRIGHT), pBlur = program(VS_FULL, FS_BLUR), pPost = program(VS_FULL, FS_POST);
 
     // the four corners of a quad (one small buffer, shared), the instance buffer, and their vertex arrays
@@ -768,6 +773,25 @@
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
 
     E.makeAtlas = function (data, size) { return texture(size, size, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, data); };
+    // WARMING. The optional builds are made the first time a frame needs them, and making one (compiling and
+    // linking, and the driver's own work on the first draw) can take a hundred milliseconds or more: a hitch in
+    // the middle of a game. E.warm(features) makes them all at start-up instead. features: { cones, rings, rows,
+    // groundMap, lightMap, hdr } (true for each the game will use). Cones and rings come and go from frame to
+    // frame, so every combination of them is made; the rest are taken to stay on once they are set. Each program
+    // is drawn once into a 1 x 1 target, so the driver does its own part now too. Returns how many were made.
+    let warmFbo = null;
+    E.warm = function (f) {
+      f = f || {};
+      if (!warmFbo) { warmFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), 0); gl.bindTexture(gl.TEXTURE_2D, null); }      // (unbound, or the programs would sample their own target)
+      const progs = [], hdr = !!f.hdr && floatOK;
+      [false, !!f.cones].forEach(function (c, i) { if (i && !c) return; [false, !!f.rings].forEach(function (r, j) { if (j && !r) return; progs.push(lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r)); }); });
+      if (f.rows) progs.push(variant('gr', VS_SLICE, FS_G, ['ROWS_ON']), variant('gvr', VS_VOXEL, FS_GVOXEL, ['ROWS_ON']), variant('gir', VS_IMP, FS_GIMP, ['ROWS_ON']));
+      if (hdr) progs.push(variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']), variant('ph', VS_FULL, FS_POST, ['HDR_ON']));
+      gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.viewport(0, 0, 1, 1); gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.bindVertexArray(vaoFull);
+      progs.forEach(function (p) { gl.useProgram(p.p); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); });
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return progs.length;
+    };
     // the palette: 256 colours (rgb, and a glow in alpha) per row, `rows` rows (1 if not given; at most 64)
     let palRows = 1;
     E.setPalette = function (bytes, rows) { palRows = Math.max(1, Math.min(64, rows || 1)); palTex = texture(256, palRows, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bytes); };
@@ -1063,8 +1087,7 @@
       const ns = Math.min(CONES, (opt.cones || []).length);
       const nr = Math.min(RINGS, (opt.rings || []).length);
       const HD = opt.hdr && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
-      const on = (ns ? ['CONES_ON'] : []).concat(rowsOn ? ['ROWS_ON'] : [], gmTex ? ['GROUND_ON'] : [], lmTex ? ['LIGHTMAP_ON'] : [], HD ? ['HDR_ON'] : [], nr ? ['RINGS_ON'] : []);
-      const pl = on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight, u = pl.u, sun = env.sun;
+      const pl = lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr), u = pl.u, sun = env.sun;
       gl.bindFramebuffer(gl.FRAMEBUFFER, litF); gl.useProgram(pl.p); gl.bindVertexArray(vaoFull);
       [[g0, 'u_g0'], [g1, 'u_g1'], [palTex, 'u_pal'], [hmTex, 'u_hm']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
       if (rowsOn) { gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, g2); gl.uniform1i(u.u_g2, 7); }

@@ -696,6 +696,12 @@ like the default; at night bright lights and beams bloom. `?hdr=1` in the demo.
 Cone lights, palette rows, the ground map, the light map and HDR are each compiled into their own build of
 the shaders, made the first time they are used; the default build only gained the multiplications by the unit
 and the height-haze test. The village draws the same, pixel for pixel, and its frame times are within noise.
+Making a build takes time (compiling, linking and the driver's own work on its first draw), and if that happens
+on the first frame that needs it, the game hitches. `E.warm({ cones, rings, rows, groundMap, lightMap, hdr })`
+makes the ones a game says it will use at start-up: every combination of cones and rings (which come and go
+from frame to frame) with the rest on. On the desktop of the tables here, the first frame with cones and rings
+went from 6 to 13 ms to under 1 ms; a game reported 140 to 190 ms before warming. The demo warms what its
+address asks for (`?nowarm=1` to see the difference).
 
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps

@@ -33,6 +33,9 @@
   // ?unit=0.1: the same scene in other world units (every position, size and the camera times 0.1, opt.unit 0.1):
   // a test that the light pass is free of art-pixel numbers. It should look the same.
   const UNIT = Q.has('unit') ? parseFloat(Q.get('unit')) || 1 : 1;
+  // the optional builds of the shaders this page will use, made now rather than on the first frame that needs each
+  // (?nowarm=1 leaves them to be made when first needed, to measure the hitch that saves)
+  if (!Q.has('nowarm')) E.warm({ cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
   // ?groundmap=1: the country round the map from a ground map (a 4-unit cell, two palette indices and a wear): the
   // road carried on past both edges as worn ruts, fields of pasture and plough, and a few old shell scorches,
   // in the village's own colours. The map itself is drawn by its tiles; the ground map shows past its edge.
