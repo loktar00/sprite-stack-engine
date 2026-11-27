@@ -359,7 +359,17 @@
   float land(vec2 p) { return textureLod(u_hm, (p - u_hmBox.xy) / u_hmBox.zw, 0.0).r * u_hmK.x; }      // smoothed between cells
   // how far a point is clear of the land: above it, or (with a two-layer height map) under a floating crown
 #if TWO_ON
-  float clr(vec3 s) { vec2 h = textureLod(u_hm, (s.xy - u_hmBox.xy) / u_hmBox.zw, 0.0).rg * u_hmK.x; return max(s.z - h.x, h.y - s.z); }
+  // With two layers the clearance is worked out at the four cells round the point and then mixed (not the layers
+  // mixed and then the clearance): a crown's bottom smoothed into an empty neighbour's 0 would make a false floor
+  // that the walk under a crown meets cell by cell (zebra bands). An empty cell is clear by the point's height.
+  float clr2(vec3 s, vec4 box, float k) {
+    vec2 g = (s.xy - box.xy) / box.zw * vec2(textureSize(u_hm, 0)) - 0.5, f = fract(g); ivec2 c = ivec2(floor(g)), S = textureSize(u_hm, 0) - 1;
+    vec2 a = texelFetch(u_hm, clamp(c, ivec2(0), S), 0).rg * k, b = texelFetch(u_hm, clamp(c + ivec2(1, 0), ivec2(0), S), 0).rg * k;
+    vec2 e = texelFetch(u_hm, clamp(c + ivec2(0, 1), ivec2(0), S), 0).rg * k, d = texelFetch(u_hm, clamp(c + ivec2(1, 1), ivec2(0), S), 0).rg * k;
+    float ca = max(s.z - a.x, a.y - s.z), cb = max(s.z - b.x, b.y - s.z), ce = max(s.z - e.x, e.y - s.z), cd = max(s.z - d.x, d.y - s.z);
+    return mix(mix(ca, cb, f.x), mix(ce, cd, f.x), f.y);
+  }
+  float clr(vec3 s) { return clr2(s, u_hmBox, u_hmK.x); }
 #else
   float clr(vec3 s) { return s.z - land(s.xy); }
 #endif
@@ -673,6 +683,7 @@
   #define SELF_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
   uniform vec2 u_self;
+  uniform float u_classic;    // light.walk 'classic': the moon's walk as it was before the filtered map, the jitter and the near cap
   uniform highp sampler2D u_lt;
   uniform vec4 u_lamp[8], u_lampCol[8]; uniform float u_lampHalo[8];
   uniform int u_nl, u_ns; uniform float u_lampCap, u_falloff;
@@ -714,7 +725,28 @@
   #endif
   }
   // how far a point is clear of the solid there (negative inside it): above the top, or under a floating crown
+  #if TWO_ON
+  // With two layers the clearance is worked out at the four cells round the point and then mixed (not the layers
+  // mixed and then the clearance): a crown's bottom smoothed into an empty neighbour's 0 would make a false floor
+  // that the walk under a crown meets cell by cell (zebra bands). An empty cell is clear by the point's height.
+  float clr2(vec3 s, vec4 box, float k) {
+    vec2 g = (s.xy - box.xy) / box.zw * vec2(textureSize(u_hm, 0)) - 0.5, f = fract(g); ivec2 c = ivec2(floor(g)), S = textureSize(u_hm, 0) - 1;
+    vec2 a = texelFetch(u_hm, clamp(c, ivec2(0), S), 0).rg * k, b = texelFetch(u_hm, clamp(c + ivec2(1, 0), ivec2(0), S), 0).rg * k;
+    vec2 e = texelFetch(u_hm, clamp(c + ivec2(0, 1), ivec2(0), S), 0).rg * k, d = texelFetch(u_hm, clamp(c + ivec2(1, 1), ivec2(0), S), 0).rg * k;
+    float ca = max(s.z - a.x, a.y - s.z), cb = max(s.z - b.x, b.y - s.z), ce = max(s.z - e.x, e.y - s.z), cd = max(s.z - d.x, d.y - s.z);
+    return mix(mix(ca, cb, f.x), mix(ce, cd, f.x), f.y);
+  }
+  float clearOf(vec3 s) {
+    vec2 uv = (s.xy - u_hmBox.xy) / u_hmBox.zw; if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return s.z;
+    if (u_classic > 0.5) { vec2 h = textureLod(u_hm, uv, 0.0).rg * u_hmK.x; return max(s.z - h.x, h.y - s.z); }      // light.walk 'classic'
+    return clr2(s, u_hmBox, u_hmK.x);
+  }
+  // the same from one smoothed read (the layers mixed, then the clearance): cheaper, and good enough far from the
+  // pixel and for the lamps' occlusion, where a crown's edge is a few pixels on screen
+  float clearFast(vec3 s) { vec2 h = hm(s.xy); return max(s.z - h.x, h.y - s.z); }
+  #else
   float clearOf(vec3 s) { vec2 h = hm(s.xy); return max(s.z - h.x, h.y - s.z); }
+  #endif
   float fogAt(float z) { return u_fog.x * exp(-max(z, 0.0) * u_fog.y); }
   // where another internal pixel of this frame lies in the world (its stored height on its own view ray); sky: far away
   vec3 worldAt(ivec2 q) {
@@ -774,7 +806,7 @@
       else { float a = 1.0 - r / L.w; att = a * a; }
       float lam = u_falloff > 0.5 ? 0.22 + 0.78 * max(dot(n, d3 / max(r, 0.001)), 0.0) : 0.3 + 0.7 * max(dot(n, d3 / max(r, 0.001)), 0.0);
       float occ = 1.0;
-      if (C.w > 0.5 && r > 0.4 * KM) { for (int k = 1; k < 32; k++) { if (float(k) >= u_qual.x) break; vec3 s = p + d3 * (float(k) / u_qual.x); occ = min(occ, clamp(clearOf(s) * 2.5 / KM + 0.35, 0.0, 1.0)); } }
+      if (C.w > 0.5 && r > 0.4 * KM) { for (int k = 1; k < 32; k++) { if (float(k) >= u_qual.x) break; vec3 s = p + d3 * (float(k) / u_qual.x); occ = min(occ, clamp(clearFast(s) * 2.5 / KM + 0.35, 0.0, 1.0)); } }
       irr += C.rgb * att * lam * occ; warm += C.rgb * att * occ;
       if (wet > 0.0) { vec3 hv = normalize(d3 / max(r, 0.001) - ray); spec += C.rgb * att * occ * pow(max(dot(n, hv), 0.0001), wet > 0.5 ? 70.0 : 18.0) * (wet > 0.5 ? 0.8 : 0.5 * wet); }
     }
@@ -828,17 +860,22 @@
     }
     n = n / max(length(n), 1e-4);
 
-    // the moon's shadow: walk towards it over the height map, steps from 0.12 m growing to 1 m, a wide penumbra
+    // the moon's shadow: walk towards it over the height map, steps from 0.12 m growing to 1 m, a wide penumbra.
+    // Every screen pixel starts its walk at its own fraction of a step (interleaved gradient noise), so the steps'
+    // banding becomes a fine noise; and for the first few metres no step is longer than a cell of the height map,
+    // so a thin caster near the pixel (a trunk) is not stepped over.
     float sh = 1.0;
     if (u_q.x > 0.0) {
       vec3 q = p + n * (0.06 * KM) + vec3(0.0, 0.0, 0.04 * KM);
-      float d = 0.0, ds = 0.12 * KM * u_qual.z;
+      float ign = u_classic > 0.5 ? 0.0 : fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+      float cell = u_hmBox.z / float(textureSize(u_hm, 0).x), far = KM * u_qual.z, near = u_classic > 0.5 ? far : clamp(cell, 0.05 * KM, far);
+      float ds = 0.12 * KM * u_qual.z, d = ds * ign;
       for (int i = 0; i < 160; i++) {
         if (float(i) >= u_q.x) break;
-        d += ds; ds = min(ds * u_qual2.x, KM * u_qual.z);
+        d += ds; ds = min(ds * u_qual2.x, mix(near, far, smoothstep(2.0 * KM, 6.0 * KM, d)));
         vec3 s = q + u_moon * d;
         if (s.z > u_hmK.y) break;
-        sh = min(sh, clamp(clearOf(s) / ((0.11 * d + 0.05 * KM) * u_qual2.z), 0.0, 1.0));
+        sh = min(sh, clamp((d < 8.0 * KM ? clearOf(s) : clearFast(s)) / ((0.11 * d + 0.05 * KM) * u_qual2.z), 0.0, 1.0));      // (exact near the pixel, one read further on)
         if (sh <= 0.0) break;
       }
       sh = sh * sh * (3.0 - 2.0 * sh);
@@ -1175,6 +1212,16 @@
       return (hdr = t);
     }
     let fxShift = 2;      // bloom and the depth of field at a quarter (2) or a half (1) of the internal size (opt.quality.fxRes)
+    // the third slice-pass target (palette rows, self-shading), made only for a frame that needs it, so a game that
+    // uses neither pays nothing for it
+    function gTargets() {
+      if (fboGR) return fboGR;
+      const w = iw, h = ih;
+      g2 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); fboGR = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboGR);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, g2, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+      return fboGR;
+    }
     function targets(w, h, shift) {
       if (w === iw && h === ih && shift === fxShift) return; iw = w; ih = h; fxShift = shift; bw = Math.max(1, w >> shift); bh = Math.max(1, h >> shift); hdr = null;
       g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
@@ -1183,10 +1230,7 @@
       fboG = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboG);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-      // the same with the palette row as a third target, for a palette with more than one row
-      g2 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); fboGR = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboGR);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, g2, 0);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+      g2 = null; fboGR = null;      // (the third target is made when first needed: see gTargets)
       fboLit = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lit, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);      // so the fx hook can test against the slice pass
       fboCount = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, countTex, 0);
@@ -1518,7 +1562,7 @@
 
       // the slice pass: G-buffer only
       const rowsOn = palRows > 1, SF = opt.self && opt.self.atlas ? opt.self : null;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, rowsOn || SF ? fboGR : fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rowsOn || SF ? gTargets() : fboG); gl.clearColor(0, 0, 0, 0); gl.clearDepth(1); gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       const pg = gProgram(opt.voxel ? 'v' : 'f', rowsOn, !!SF), pc = opt.voxel ? pCountVoxel : pCount, tested = opt.hsr || !!opt.voxel;      // voxel mode always tests depth
       const sprites = opt.impostors && opt.impostors.length ? opt.impostors : null;
       drawSlices(pg, n, M, opt, tested);
@@ -1576,7 +1620,7 @@
         gl.uniform4fv(u.u_hmBox, hmBox); gl.uniform3f(u.u_hmK, 255 * hmStep, 255 * hmStep - 0.875 * U * 10, U);
         gl.uniform4f(u.u_q, opt.shadows ? Math.min(160, Math.round((opt.cheap ? 22 : 48) * qf * qr)) : 0, opt.ao ? 1 : 0, opt.beams === false ? 0 : 1, env.emissive !== undefined ? env.emissive : 3);
         gl.uniform4f(u.u_qual2, Math.pow(1.13, 1 / qf), Math.max(1, Math.min(16, Q.aoDirs || 6)), Q.shadowSoft || 1, 0);
-        gl.uniform4f(u.u_look, env.fogNear || 0, env.rim || 0, 0, env.rimWarm || 0);
+        gl.uniform4f(u.u_look, env.fogNear || 0, env.rim || 0, 0, env.rimWarm || 0); gl.uniform1f(u.u_classic, env.walk === 'classic' ? 1 : 0);
         const CT = opt.contacts || [], nc = Math.min(CONTACTS, CT.length), cv = new Float32Array(CONTACTS * 4); for (let i = 0; i < nc; i++) cv.set(CT[i].slice(0, 4), i * 4);
         gl.uniform4fv(u.u_contact, cv); gl.uniform1i(u.u_ncontact, nc);
         if (env.floor) { const fp = new Float32Array(32); (env.floorParams || []).slice(0, 8).forEach(function (v, i) { fp.set(v.slice(0, 4), i * 4); }); gl.uniform4fv(u.u_floor, fp); if (env.floorUniforms) env.floorUniforms(gl, u); }

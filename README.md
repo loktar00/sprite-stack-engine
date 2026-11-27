@@ -749,6 +749,14 @@ the view distance in alpha too. The night model always uses it.
 tallest thing and the bottom of its highest solid run, so a crown floats on its trunk and the sun or the moon
 gets in under it (both models).
 
+**Tall thin casters at night.** The moon's shadow walk starts each screen pixel at its own fraction of a step
+(interleaved gradient noise), so the steps' banding becomes a fine noise that the grain hides; no step is longer
+than a cell of the height map for the first few metres, so a trunk near the pixel is not stepped over; and with a
+two-layer map, the clearance is worked out at the four cells round each point and then mixed, for the first 8
+metres of the walk (a crown's bottom smoothed into an empty neighbour made a false floor that a walk under the crown
+met cell by cell: zebra bands round every trunk). Real tree columns then throw clean shadows, with the moon under
+the crowns, for 2 to 7 % more frame time in a dense forest. `light.walk: 'classic'` keeps the walk as it was.
+
 **The camera's planes.** `cam.near` and `cam.far` set the near and far planes when the defaults (from
 `opt.unit`) do not suit; a coneTable (`opt.coneTable`) gives the cones' shadow tables directly instead of
 blockers. `Engine.create(canvas, { warm })` warms the builds a game will use at once (by default the plain and
