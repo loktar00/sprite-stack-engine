@@ -1254,6 +1254,14 @@
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
       return fboGR;
     }
+    // the final hook's scratch picture, made when first asked for at this size and format
+    let scratch = null;
+    function scratchTarget(hdr) {
+      if (scratch && scratch.w === iw && scratch.h === ih && scratch.hdr === hdr) return scratch;
+      const t = hdr ? texture(iw, ih, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR) : texture(iw, ih, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR), f = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      return (scratch = { tex: t, fbo: f, w: iw, h: ih, hdr: hdr });
+    }
     function targets(w, h, shift) {
       if (w === iw && h === ih && shift === fxShift) return; iw = w; ih = h; fxShift = shift; bw = Math.max(1, w >> shift); bh = Math.max(1, h >> shift); hdr = null;
       g0 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); g1 = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); lit = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
@@ -1582,6 +1590,7 @@
     //        falloff ('window' for the steep windowed lamp falloff), contacts [[x, y, radius, strength]] (night),
     //        self ({ atlas: [self0, self1] (E.makeAtlas of an Art.Atlas's self0 and self1), occlusion, shadow (strengths, 1) }:
     //        the models' baked self-shading),
+    //        final (function (gl, ctx): a game's pass over the lit picture before bloom and post, see THE FINAL HOOK),
     //        occ ({ steps (32), step (3/4 of a cell), strength (1.2), start (a cell) }: the occupancy march, see setOccupancy),
     //        post ({ dof: [focus, depth, row, strength], grade: [contrast, black, saturation, shadow blue], grain,
     //        vignette, exposure, bloom, knee }: the film post, on the half-float picture),
@@ -1637,7 +1646,7 @@
       const nr = Math.min(RINGS, (opt.rings || []).length);
       // the night model and the film post both need the half-float picture
       const night = env.model === 'night', film = !!(opt.post || night) && floatOK;
-      const HD = (opt.hdr || night || opt.post) && floatOK ? hdrTargets() : null, litT = HD ? HD.lit : lit, litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
+      const HD = (opt.hdr || night || opt.post) && floatOK ? hdrTargets() : null; let litT = HD ? HD.lit : lit; const litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
       const OC = opt.occ && occTex ? opt.occ : null;
       const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null, !!SF, !!OC) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film, !!SF, !!OC), u = pl.u, sun = env.sun;
       if (OC) {
@@ -1715,6 +1724,25 @@
         gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.depthMask(true); gl.bindVertexArray(vaoFull); gl.activeTexture(gl.TEXTURE0);
       }
 
+      // THE FINAL HOOK (opt.final): a game's own pass over the lit picture, after the light pass and the fx hook and
+      // before the engine's bloom and post. It is called as final(gl, ctx), ctx: { M (the matrices), w, h (the
+      // picture's size), hdr (true: the picture is linear half float; false: already tone-mapped), lit (the picture),
+      // litFbo (its framebuffer), g0 (palette index, facing), g1 (height; in voxel mode the view distance too), g2 (row,
+      // self-shading, or null), scratch() (a second picture like lit, with its framebuffer: { tex, fbo }), canvas: { w,
+      // h, viewport: [x, y, w, h] where the engine shows the picture } }. It returns nothing (the engine goes on with
+      // lit, which the game may have drawn into), { lit: texture } (the engine goes on with that picture instead), or
+      // { skipPost: true } (the game has put the frame on the canvas itself; the engine stops).
+      let skipPost = false;
+      if (opt.final && !opt.heat) {
+        const vpX = ss ? 0 : (W - iw * scale) >> 1, vpY = ss ? 0 : (H - ih * scale) >> 1;
+        const r = opt.final(gl, { M: M, w: iw, h: ih, hdr: !!HD, lit: litT, litFbo: litF, g0: g0, g1: g1, g2: g2, scratch: function () { return scratchTarget(!!HD); },
+          canvas: { w: W, h: H, viewport: ss ? [0, 0, W, H] : [vpX, vpY, iw * scale, ih * scale] } });
+        gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.depthMask(true); gl.bindVertexArray(vaoFull); gl.activeTexture(gl.TEXTURE0);
+        if (r && r.lit) litT = r.lit;
+        if (r && r.skipPost) skipPost = true;
+      }
+
+      if (!skipPost) {
       // bloom: what glows, shrunk to a quarter, blurred across and down, then again wider
       const PO = opt.post || {}, knee = PO.knee || env.knee || 1;
       if (opt.bloom && !opt.heat) {
@@ -1749,6 +1777,7 @@
         gl.uniform2f(pp.u.u_size, iw, ih); gl.uniform2f(pp.u.u_k, opt.bloom ? 0.55 + 0.75 * env.glow : 0, 0.22); if (HD) gl.uniform1f(pp.u.u_exp, env.exposure); gl.uniform3f(pp.u.u_ss, ss ? 1 : 0, 0.25 / W, 0.25 / H);
       }
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
 
       // GPU time for the frame, when the browser offers a timer (many do not)
       if (timing) { gl.endQuery(timerExt.TIME_ELAPSED_EXT); timing = false; }

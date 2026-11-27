@@ -846,6 +846,15 @@ the High and Ultra presets. `?occ=1` in the demo (`&occsteps=64`, `&occcell=1`).
 | --- | --- | --- |
 | A tree's shadow on the farmhouse wall | ![](media/occ-farm-off.png) | ![](media/occ-farm-on.png) |
 
+**The final hook.** `opt.final(gl, ctx)` runs after the light pass and the fx hook, before the engine's bloom and
+post: a game's own pass over the lit picture. `ctx` holds the matrices (`M`), the picture's size, whether it is
+linear half float (`hdr`) or already tone-mapped, the picture and its framebuffer (`lit`, `litFbo`), the slice
+pass's targets as textures (`g0`: palette index and facing; `g1`: height, and in voxel mode the view distance;
+`g2`: palette row and self-shading, or null), `scratch()` (a second picture of the same kind, `{ tex, fbo }`), and
+where the engine shows the picture on the canvas. Return nothing to go on with `lit` (drawn into or not),
+`{ lit: texture }` to go on with another picture, or `{ skipPost: true }` when the game has put the frame on the
+canvas itself with its own tone curve. The engine puts its state back afterwards.
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.
