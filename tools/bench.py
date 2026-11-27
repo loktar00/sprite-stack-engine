@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bench.py: measure the demo and print a table. Also saves a still of each configuration.
 
-    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel] [--tricks] [--weak]
+    python tools/bench.py [--out out/bench] [--frames 120] [--software] [--voxel] [--tricks] [--weak] [--hordes]
 
 Needs Playwright (pip install playwright; playwright install chromium). The page runs at 1920x1080 in headless
 Chromium. For each configuration it asks the page for:
@@ -14,6 +14,8 @@ shows where flat slices do not (level: nearly along the ground), then how many g
 hollow slices drawn whole and in strips, and in voxel mode. Add --software for a CPU rasteriser as a stand-in.
 --tricks measures the faster ways to draw (voxel mode, impostors, skipping thin layers): each alone and all
 together, against plain quads, with hidden-surface removal and shell stacks on throughout.
+--hordes measures lights and hordes: the street and overview views at dusk with 0 to 5000 vehicles from the item
+pool, and 0 to 256 point lights and 0 to 16 cone lights on them (the page's ?horde, ?lights and ?cones).
 """
 import argparse, asyncio, json, os, pathlib
 from playwright.async_api import async_playwright
@@ -34,6 +36,7 @@ async def main():
     ap.add_argument('--voxel', action='store_true')
     ap.add_argument('--tricks', action='store_true')
     ap.add_argument('--weak', action='store_true')
+    ap.add_argument('--hordes', action='store_true')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     url = (pathlib.Path(__file__).resolve().parent.parent / 'index.html').as_uri() + '?hold'
@@ -51,6 +54,23 @@ async def main():
         except Exception:
             print('the page did not start; errors:', errors[:5])
             raise SystemExit(1)
+        if a.hordes:
+            print('renderer:', await page.evaluate('demo.engine.renderer'))
+            print('| view | vehicles | point lights | cones | quads or boxes | build ms | ms/frame |')
+            print('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
+            for view, vox in [('street', 1), ('overview', 0)]:
+                for n, nl, nc in [(0, 0, 0), (500, 0, 0), (2000, 0, 0), (5000, 0, 0), (2000, 64, 0), (2000, 256, 0), (2000, 0, 16), (2000, 256, 16)]:
+                    await page.goto(url + '&horde=%d&lights=%d&cones=%d&tod=1' % (n, nl, nc))
+                    await page.wait_for_function('window.demo && window.demo.ready', timeout=20000)
+                    await page.evaluate('(c) => demo.set(c)', {'view': view, 'res': 'native', 'hsr': True, 'shell': True, 'heat': 0, 'measure': False, 'voxel': vox})
+                    m = await page.evaluate('demo.measure(0)')
+                    ms = await page.evaluate('(n) => demo.bench(n)', a.frames)
+                    cpu = await page.evaluate('demo.engine.stats.cpuMs')
+                    await page.evaluate('demo.seek(0)'); await page.screenshot(path=os.path.join(a.out, 'horde-%s-%d-%d-%d.png' % (view, n, nl, nc)))
+                    print('| %s%s | %d | %d | %d | %d | %.2f | %.2f |' % (view, ' (voxel mode)' if vox else '', n, nl, nc, m['quads'], cpu, ms), flush=True)
+            print('errors:', errors[:5])
+            await browser.close()
+            return
         if a.weak:
             print('renderer:', await page.evaluate('demo.engine.renderer'))
             print('| internal | preset | drawn as | quads or boxes | written avg | covered avg | ms/frame |')

@@ -152,6 +152,28 @@
     voxel: num('voxel', preset.voxel), unclamped: Q.has('unclamped'), impostors: num('impostors', 0) === 1, lod: num('lod', preset.lod) === 1, shadows: num('shadows', 1) === 1, ao: num('ao', 1) === 1, bloom: num('bloom', preset.bloom) === 1, tod: num('tod', HELD || TOURING ? 0.25 : -1), measure: num('measure', 0) === 1, orbit: !HELD && !TOURING && !Q.has('yaw') };
   let list = [], sprites = [], sheet = null, blobs = [], lamps = [], frame = 0, env = Scene.light(0), scale = 1;
 
+  // ---------------------------------------------------------------- lights and hordes (off unless asked for)
+  //   ?horde=N    N vehicles (jeeps and halftracks) in columns crossing the map, drawn from a pool of items
+  //   ?lights=N   a point light on N of them, spread through the columns (up to 256): 8 shadowed by the height map, all with a halo
+  //   ?cones=N    searchlights on N of them (up to 16): a pool and a beam each, cut by the map's trees and buildings
+  // e.g. ?horde=2000&lights=256&cones=16&tod=1 (a convoy at dusk). bench.py --hordes measures them.
+  const HORDE = Math.max(0, num('horde', 0) | 0), NLIGHTS = Math.max(0, num('lights', 0) | 0), NCONES = Math.max(0, num('cones', 0) | 0);
+  const pool = Engine.itemPool(), cones = [];
+  let blockers = null;
+  function horde(t, set) {
+    pool.begin(list); cones.length = 0;
+    if (NCONES && !blockers && num("coneshadows", 1)) blockers = statics[0].filter(function (it) { return !it.stack.def.ground && it.stack.n > 12; }).map(function (it) { return [it.x, it.y, it.stack.radius * it.scale * 0.45, it.z + it.stack.n * it.scale]; });
+    const W = Scene.WORLD.w - 40, rows = Math.max(1, Math.ceil(HORDE / 60)), lstep = Math.max(1, Math.floor(HORDE / Math.max(1, NLIGHTS))), cstep = Math.max(1, Math.floor(HORDE / Math.max(1, NCONES)));
+    for (let i = 0; i < HORDE; i++) {
+      const r = i % rows, k = (i / rows) | 0, dir = r & 1 ? -1 : 1, y = 24 + (r + 0.5) * (Scene.WORLD.h - 48) / rows;
+      const x = 20 + ((((k * W / 60 + dir * t * 9) % W) + W) % W), h = dir > 0 ? 0 : Math.PI, z = Scene.groundAt(x, y);
+      const it = pool.add(set.stacks[i % 3 ? 'jeep' : 'halftrack'], x, y, z + 0.3 * Math.abs(Math.sin(x * 0.33 + i)), h);
+      it.fade = Math.max(0, 1 - Math.min(x - 20, W + 20 - x) / 12);      // they fade in and out where the columns wrap round
+      if (i % lstep === 0 && i / lstep < NLIGHTS) { const c = (i / lstep) % 3; lamps.push([x + dir * 6, y, z + 8, 42, c === 0 ? 2.6 : c === 1 ? 1.1 : 2.6, c === 0 ? 1.5 : c === 1 ? 1.5 : 0.45, c === 0 ? 0.5 : c === 1 ? 2.3 : 0.3, i < 8 * lstep ? 1 : 0, 0.8]); }
+      if (i % cstep === 0 && i / cstep < NCONES) cones.push([x + dir * 4, y, z + 14, 150, dir, 0, -0.55, 0.42, 1.5, 1.4, 1.1, 1.2]);      // a searchlight on its roof
+    }
+  }
+
   // ---------------------------------------------------------------- voxel mode: when
   // Flat slices stay solid while two things hold (both measured: see "Voxel mode" in the README).
   //  - The tilt is at least VOXEL_TILT. Below it a slice is nearly edge-on, and thin parts (a soldier's limbs, a
@@ -291,13 +313,14 @@
       const P = Rig.pose(k.rig), lift = Scene.groundAt(P.x * SCALE, P.y * SCALE); C.draw(Engine.figureWriter(list, SCALE, lift), set.chars.soldier, P);
       blobs.push([P.x * SCALE, P.y * SCALE, lift + C.height * SCALE, 3, lift - 1]);
     });
-    animate(t, set); effects(t);
+    animate(t, set); effects(t); if (HORDE) horde(t, set);
     // impostors only where they hold: the parallel camera, with the depth test on, and once they are baked for this tilt
     const baked = S.impostors && cam.mode !== 'persp' && (S.hsr || voxel) ? E.prepareImpostors(IMPOSTORS[S.shell ? 1 : 0], set.atlas, cam.pitch) : null;
     sprites.length = 0; sheet = baked;
     for (let i = 0; i < st.length; i++) if (baked && st[i].sprite && !baked.full) sprites.push(st[i]); else list.push(st[i]);
     E.render({ cam: cam, list: list, atlas: set.atlas, hsr: S.hsr, fill: S.fill, guard: S.guard, voxel: voxel, lod: S.lod, impostors: sprites, heat: S.heat, measure: measure || S.measure, scale: scale, split: S.split, cheap: S.cheap,
-      shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t });
+      shadows: S.shadows, ao: S.ao, bloom: S.bloom, light: env, lamps: lamps, blobs: blobs, water: pal.names.water2, ground: G, time: t,
+      cones: cones, coneBlockers: blockers, lampCap: NLIGHTS > 16 ? 0.4 : 0 });
     rowsSeen = E.stats.rows;                                   // how tall the tallest layer was on screen: next frame's decision
     badge.classList.toggle('on', voxel);
   }
