@@ -87,9 +87,29 @@
     statics[0].forEach(function (it) { if (!it.stack.def.ground) OCC.addStack(it.stack, it.x, it.y, it.z, it.rot, it.scale, 1); });
     OCC.snapshot(); OCC.upload(E); OCC.ms = performance.now() - t0;
   }
+  // ?decals=N: N soft marks on the ground (scorches, oil, mud and rust stains) from a small atlas made here, put down
+  // with E.decal: near the craters and along the road, or (with ?stress=1) anywhere on the map, to measure
+  const NDEC = Math.max(0, num('decals', 0) | 0);
+  if (NDEC) {
+    const A = 64, at = new Uint8Array(A * 4 * A * 4), cols = [[22, 16, 12], [8, 8, 10], [58, 44, 30], [92, 40, 22]];
+    for (let k = 0; k < 4; k++) for (let y = 0; y < A; y++) for (let x = 0; x < A; x++) {
+      const dx = (x + 0.5) / A * 2 - 1, dy = (y + 0.5) / A * 2 - 1, a = Math.atan2(dy, dx), r = Math.hypot(dx, dy) / (0.72 + 0.22 * Art.noise(Math.cos(a) * 2 + 9 * k, Math.sin(a) * 2, 3 + k));
+      const n = Art.noise(x / 6 + k * 40, y / 6, 7), al = Math.max(0, Math.min(1, (1 - r) * 3.2)) * (k === 1 ? 0.92 : 0.55 + 0.45 * n), o = (y * A * 4 + k * A + x) * 4, sh = k === 1 ? 0.7 + 0.6 * Math.max(0, 0.5 - r) : 0.75 + 0.5 * n;
+      at[o] = Math.min(255, cols[k][0] * sh); at[o + 1] = Math.min(255, cols[k][1] * sh); at[o + 2] = Math.min(255, cols[k][2] * sh); at[o + 3] = Math.round(al * 255);
+    }
+    E.setDecalAtlas(at, A * 4, A); E.decalCap(Math.max(1024, NDEC));
+    const W = Scene.WORLD.w, H = Scene.WORLD.h;
+    for (let i = 0; i < NDEC; i++) {
+      const h1 = Art.hash(i, 1, 77), h2 = Art.hash(i, 2, 77), h3 = Art.hash(i, 3, 77), k = Q.has('stress') ? i & 3 : h3 < 0.5 ? 0 : h3 < 0.7 ? 1 : h3 < 0.9 ? 2 : 3;
+      let x, y;
+      if (Q.has('stress')) { x = 10 + h1 * (W - 20); y = 10 + h2 * (H - 20); }
+      else { x = 20 + h1 * (W - 40); y = Scene.roadY(x) + (h2 - 0.5) * 40; }
+      E.decal(x, y, h3 * 6.283, 0.22 + 0.25 * Art.hash(i, 4, 77), [k * A, 0, A, A], null, 0.6 + 0.3 * h2, Scene.groundAt(x, y));
+    }
+  }
   // the optional builds of the shaders this page will use, made now rather than on the first frame that needs each
   // (?nowarm=1 leaves them to be made when first needed, to measure the hitch that saves)
-  if (!Q.has('nowarm')) E.warm({ occ: !!OCC, self: SELF, night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
+  if (!Q.has('nowarm')) E.warm({ decals: NDEC > 0, occ: !!OCC, self: SELF, night: NIGHT, cones: num('cones', 0) > 0, rings: num('rings', 0) > 0, rows: Q.has('rows'), groundMap: Q.has('groundmap'), lightMap: Q.has('lightmap'), hdr: Q.has('hdr') });
   // Stacks that stand in many places and never change (trees, tufts, graves, poles) can be drawn as impostors.
   const often = {}; LAYOUT.forEach(function (l) { often[l.n] = (often[l.n] || 0) + 1; });
   const IMPOSTORS = SETS.map(function (S) { return DEFS.filter(function (d) { return often[d.name] >= 5 && !d.ground && !d.wheat; }).map(function (d) { return S.stacks[d.name]; }); });

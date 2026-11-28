@@ -329,6 +329,39 @@
     return exp(-od * u_occQ.z);
   }
   #endif`;
+  // DECALS (E.decal): soft marks on the ground (a pool of oil, a scorch, a stain) with a smooth alpha edge, from an
+  // atlas the game gives (E.setDecalAtlas). Each is a quad lying flat at its height, drawn after the slice pass into
+  // a screen-sized colour target (premultiplied, blended in order); a pixel takes it only where the slice pass left
+  // ground or a surface facing up within a little of the decal's height there, so what stands on or over it hides
+  // it, in every drawing order. The light pass then lays it over the surface's colour before any light: the sun,
+  // the moon, the lamps and the light map light it like the ground under it.
+  const VS_DECAL = `#version 300 es
+  layout(location=0) in vec4 a_pos;      // x, y, z, rot
+  layout(location=1) in vec4 a_rect;     // the decal's rectangle in its atlas (texels)
+  layout(location=2) in vec4 a_tint;     // rgb, alpha
+  layout(location=3) in float a_scale;   // world units per atlas texel
+  layout(location=5) in vec2 a_corner;
+  uniform mat4 u_vp;
+  out vec2 v_uv; flat out vec4 v_tint; flat out float v_z;
+  void main() {
+    vec2 l = (a_corner - 0.5) * a_rect.zw * a_scale; float c = cos(a_pos.w), s = sin(a_pos.w);
+    gl_Position = u_vp * vec4(a_pos.xy + vec2(l.x * c - l.y * s, l.x * s + l.y * c), a_pos.z, 1.0);
+    v_uv = a_rect.xy + a_corner * a_rect.zw; v_tint = a_tint; v_z = a_pos.z;
+  }`;
+  const FS_DECAL = `#version 300 es
+  precision highp float;
+  uniform sampler2D u_dtex, u_g0, u_g1; uniform vec2 u_dsz; uniform float u_dtol, u_ground;
+  in vec2 v_uv; flat in vec4 v_tint; flat in float v_z; out vec4 o;
+  void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy); vec4 g0 = texelFetch(u_g0, px, 0);
+    if (g0.r > 0.0) {                                       // a slice is here: only its top near the decal's height takes it
+      vec4 g1 = texelFetch(u_g1, px, 0); float h = (g1.r * 65280.0 + g1.g * 255.0) / 65535.0 * ${HMAX}.0;
+      if (abs(h - v_z) > u_dtol || g0.a * 2.0 - 1.0 < 0.5) discard;
+    } else if (abs(u_ground - v_z) > u_dtol) discard;       // open ground is at its own height
+    vec4 t = texture(u_dtex, v_uv / u_dsz);
+    float a = t.a * v_tint.a; if (a < 0.002) discard;
+    o = vec4(t.rgb * v_tint.rgb * a, a);                    // premultiplied
+  }`;
   const FS_LIGHT = `#version 300 es
   precision highp float;
   #define CONES_ON 0
@@ -341,7 +374,11 @@
   #define FILM_ON 0
   #define SELF_ON 0
   #define OCC_ON 0
+  #define DECAL_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  #if DECAL_ON
+  uniform sampler2D u_dec;    // the decals over this pixel (premultiplied colour, alpha)
+  #endif
   uniform vec2 u_self;        // the self-shading's strength: occlusion, shadow
   uniform float u_falloff;    // 0: the lamps fall off as (1 - r / reach)^2; 1: windowed and steep near the source (opt.falloff)
   uniform vec4 u_qual;        // opt.quality: steps of a lamp's occlusion test, beam steps, the shadow walk's step scale, occlusion radius scale
@@ -510,6 +547,9 @@
         alb = gc.rgb; glow = gc.a;
       }
     }
+#endif
+#if DECAL_ON
+    { vec4 dc = texelFetch(u_dec, px, 0); alb = alb * (1.0 - dc.a) + dc.rgb; glow *= 1.0 - dc.a; }
 #endif
     bool wet = !outer && abs(g0.r * 255.0 - u_water) < 1.5;
     if (wet) {                                              // water: ripples that drift, one art pixel each
@@ -708,7 +748,11 @@
   #define FLOOR_ON 0
   #define SELF_ON 0
   #define OCC_ON 0
+  #define DECAL_ON 0
   uniform sampler2D u_g0, u_g1, u_pal, u_hm, u_cone;
+  #if DECAL_ON
+  uniform sampler2D u_dec;
+  #endif
   uniform vec2 u_self;
   uniform float u_classic;    // light.walk 'classic': the moon's walk as it was before the filtered map, the jitter and the near cap
   uniform highp sampler2D u_lt;
@@ -888,6 +932,9 @@
       vec3 nn = g0.gba * 2.0 - 1.0; n = nn / max(length(nn), 1e-4);
     }
     n = n / max(length(n), 1e-4);
+  #if DECAL_ON
+    { vec4 dc = texelFetch(u_dec, px, 0); alb = alb * (1.0 - dc.a) + dc.rgb; glow *= 1.0 - dc.a; wet *= 1.0 - dc.a; }
+  #endif
 
     // the moon's shadow: walk towards it over the height map, steps from 0.12 m growing to 1 m, a wide penumbra.
     // Every screen pixel starts its walk at its own fraction of a step (interleaved gradient noise), so the steps'
@@ -1198,14 +1245,14 @@
       return variant('g' + kind + on.join(), kind === 'v' ? VS_VOXEL : kind === 'i' ? VS_IMP : VS_SLICE, kind === 'v' ? FS_GVOXEL : kind === 'i' ? FS_GIMP : FS_G, on);
     }
     // the light pass for a set of features
-    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film, self, occ) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : [], self ? ['SELF_ON'] : [], occ ? ['OCC_ON'] : []);
+    function lightProgram(cones, rows, ground, lightMap, hdr, rings, two, film, self, occ, dec) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], hdr ? ['HDR_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], film ? ['FILM_ON'] : [], self ? ['SELF_ON'] : [], occ ? ['OCC_ON'] : [], dec ? ['DECAL_ON'] : []);
       return on.length ? variant('l' + on.join(), VS_FULL, FS_LIGHT, on) : pLight;
     }
     // the night model for a set of features, and a game's floor (GLSL source, or none)
     const floors = [];
-    function nightProgram(cones, rows, ground, lightMap, rings, two, floor, self, occ) {
-      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : [], self ? ['SELF_ON'] : [], occ ? ['OCC_ON'] : []);
+    function nightProgram(cones, rows, ground, lightMap, rings, two, floor, self, occ, dec) {
+      const on = (cones ? ['CONES_ON'] : []).concat(rows ? ['ROWS_ON'] : [], ground ? ['GROUND_ON'] : [], lightMap ? ['LIGHTMAP_ON'] : [], rings ? ['RINGS_ON'] : [], two ? ['TWO_ON'] : [], floor ? ['FLOOR_ON'] : [], self ? ['SELF_ON'] : [], occ ? ['OCC_ON'] : [], dec ? ['DECAL_ON'] : []);
       let fi = floor ? floors.indexOf(floor) : -1; if (floor && fi < 0) { floors.push(floor); fi = floors.length - 1; }
       return variant('n' + on.join() + '|' + fi, VS_FULL, floor ? FS_NIGHT.replace('FLOOR_SOURCE', floor) : FS_NIGHT, on);
     }
@@ -1271,6 +1318,7 @@
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, g0, 0); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, g1, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
       g2 = null; fboGR = null;      // (the third target is made when first needed: see gTargets)
+      decTex = null; decFbo = null;  // (and the decals' target: see drawDecals)
       fboLit = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboLit); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lit, 0);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);      // so the fx hook can test against the slice pass
       fboCount = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fboCount); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, countTex, 0);
@@ -1283,7 +1331,7 @@
       // hold a fraction starts as one: V8 then gives it one hidden class and stores the field as a double from the
       // start. A field added later, or an integer field that later takes a fraction, changes the class mid-run and
       // throws away the optimised code of every function that reads it.)
-      stats: { instances: 0, slices: 0, rows: 0.5, cpuMs: 0.5, gpuMs: null, written: null, covered: null, pixels: 0, pixelsHit: 0, exact: false, iw: 0, ih: 0 } };
+      stats: { decals: 0, instances: 0, slices: 0, rows: 0.5, cpuMs: 0.5, gpuMs: null, written: null, covered: null, pixels: 0, pixelsHit: 0, exact: false, iw: 0, ih: 0 } };
     let palTex = null, hmTex = null, hmBox = [0, 0, 1, 1], hmStep = 0.5, hmTwo = false, query = null, timing = false;
     let gmTex = null, gmBox = null, lmTex = null, lmBox = null, lmK = 1;
     const UNIT = floatOK ? 1 : 1 / 255;                      // without float targets the count stops at 255
@@ -1301,7 +1349,8 @@
       if (!warmFbo) { warmFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, warmFbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), 0); gl.bindTexture(gl.TEXTURE_2D, null); }      // (unbound, or the programs would sample their own target)
       const night = !!f.night && floatOK, film = (night || !!f.post) && floatOK, hdr = (!!f.hdr || film) && floatOK, progs = [];
       [false, !!f.cones].forEach(function (c, i) { if (i && !c) return; [false, !!f.rings].forEach(function (r, j) { if (j && !r) return;
-        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null, !!f.self, !!f.occ) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film, !!f.self, !!f.occ)); }); });
+        progs.push(night ? nightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, r, !!f.twoLayer, f.floor || null, !!f.self, !!f.occ, !!f.decals) : lightProgram(c, !!f.rows, !!f.groundMap, !!f.lightMap, hdr, r, !!f.twoLayer, film, !!f.self, !!f.occ, !!f.decals)); }); });
+      if (f.decals) progs.push(pDecal);
       if (film) progs.push(variant('knee', VS_FULL, FS_KNEE, []), variant('down', VS_FULL, FS_DOWN, []), variant('film', VS_FULL, FS_FILM, []));
       if (f.rows || f.self) progs.push(gProgram('f', !!f.rows, !!f.self), gProgram('v', !!f.rows, !!f.self), gProgram('i', !!f.rows, !!f.self));
       if (hdr && !film) progs.push(variant('bh', VS_FULL, FS_BRIGHT, ['HDR_ON']), variant('ph', VS_FULL, FS_POST, ['HDR_ON']));
@@ -1327,6 +1376,57 @@
       else { hmTex = texture(w, h, two ? gl.RG8 : gl.R8, F, gl.UNSIGNED_BYTE, bytes, gl.LINEAR); E.hmW = w; E.hmH = h; hmTwo = two; }
       hmBox = box ? box.slice(0, 4) : [0, 0, w, h]; hmStep = step || 0.5;
     };
+    // DECALS. E.setDecalAtlas(bytes or image, w, h): the decals' pictures, RGBA (straight alpha), read smoothed.
+    // E.decal(x, y, rot, scale, rect, tint, alpha, z) puts one down and returns its slot: rect [u, v, w, h] in the
+    // atlas, scale world units per atlas texel, tint [r, g, b] (1, 1, 1 if not given), alpha 0 to 1, z its height
+    // (opt.ground if not given). The slots are a ring: when all are taken the oldest is replaced. E.decalAlpha(slot,
+    // alpha) fades one (0 hides it), E.clearDecals() removes them all, E.decalCap(n) sets the ring's size (1024).
+    // Off (and free) until the first decal; drawn in one instanced draw. opt.decalTolerance: how far a surface may
+    // be from a decal's height and still take it (1.5 art pixels).
+    let decCap = 1024, decN = 0, decHead = 0, decDirty = false, decData = new Float32Array(decCap * 13), decAtlas = null, decAW = 1, decAH = 1, decTex = null, decFbo = null;
+    const decBuf = gl.createBuffer(), vaoDecal = gl.createVertexArray(), pDecal = program(VS_DECAL, FS_DECAL);
+    gl.bindVertexArray(vaoDecal); gl.bindBuffer(gl.ARRAY_BUFFER, decBuf);
+    [[0, 4, 0], [1, 4, 4], [2, 4, 8], [3, 1, 12]].forEach(function (a) { gl.enableVertexAttribArray(a[0]); gl.vertexAttribPointer(a[0], a[1], gl.FLOAT, false, 13 * 4, a[2] * 4); gl.vertexAttribDivisor(a[0], 1); });
+    gl.bindBuffer(gl.ARRAY_BUFFER, corners); gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 0, 0); gl.bindVertexArray(null);
+    E.setDecalAtlas = function (src, w, h) {
+      decAtlas = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, decAtlas); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      if (src instanceof Uint8Array || src instanceof Uint8ClampedArray) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
+      else { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src); w = src.width; h = src.height; }
+      [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER].forEach(function (k) { gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR); });
+      [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T].forEach(function (k) { gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE); });
+      decAW = w; decAH = h;
+    };
+    E.decalCap = function (n) { decCap = Math.max(1, n | 0); decData = new Float32Array(decCap * 13); decN = 0; decHead = 0; decDirty = true; };
+    E.decal = function (x, y, rot, scale, rect, tint, alpha, z) {
+      const i = decHead, o = i * 13; decHead = (decHead + 1) % decCap; if (decN < decCap) decN++;
+      decData[o] = x; decData[o + 1] = y; decData[o + 2] = z === undefined ? NaN : z; decData[o + 3] = rot || 0;
+      decData[o + 4] = rect[0]; decData[o + 5] = rect[1]; decData[o + 6] = rect[2]; decData[o + 7] = rect[3];
+      decData[o + 8] = tint ? tint[0] : 1; decData[o + 9] = tint ? tint[1] : 1; decData[o + 10] = tint ? tint[2] : 1; decData[o + 11] = alpha === undefined ? 1 : alpha; decData[o + 12] = scale || 1;
+      decDirty = true; return i;
+    };
+    E.decalAlpha = function (slot, alpha) { if (slot >= 0 && slot < decCap) { decData[slot * 13 + 11] = alpha; decDirty = true; } };
+    E.clearDecals = function () { decN = 0; decHead = 0; decDirty = true; };
+    E.decalCount = function () { return decN; };
+    let decGround = NaN, decUp = new Float32Array(0);
+    // the decal pass: into its own target, after the slice pass; true when there is anything to show
+    function drawDecals(M, opt) {
+      if (!decN || !decAtlas || opt.heat) return false;
+      const ground = opt.ground || 0;
+      if (decDirty || ground !== decGround) {      // (a decal with no height of its own lies on opt.ground)
+        if (decUp.length !== decData.length) decUp = new Float32Array(decData.length);
+        decUp.set(decData.subarray(0, decN * 13)); for (let i = 0; i < decN; i++) if (decUp[i * 13 + 2] !== decUp[i * 13 + 2]) decUp[i * 13 + 2] = ground;      // (NaN: on the ground)
+        gl.bindBuffer(gl.ARRAY_BUFFER, decBuf); gl.bufferData(gl.ARRAY_BUFFER, decUp.subarray(0, decN * 13), gl.DYNAMIC_DRAW); decDirty = false; decGround = ground;
+      }
+      if (!decFbo) { decTex = texture(iw, ih, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE); decFbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, decFbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, decTex, 0); }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, decFbo); gl.viewport(0, 0, iw, ih); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      const u = pDecal.u; gl.useProgram(pDecal.p); gl.bindVertexArray(vaoDecal); gl.uniformMatrix4fv(u.u_vp, false, M.vp);
+      [[decAtlas, 'u_dtex'], [g0, 'u_g0'], [g1, 'u_g1']].forEach(function (t, i) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t[0]); gl.uniform1i(u[t[1]], i); });
+      gl.uniform2f(u.u_dsz, decAW, decAH); gl.uniform1f(u.u_dtol, opt.decalTolerance !== undefined ? opt.decalTolerance : 1.5 * (opt.unit || 1)); gl.uniform1f(u.u_ground, ground);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, decN);
+      gl.disable(gl.BLEND); gl.activeTexture(gl.TEXTURE0); E.stats.decals = decN;
+      return true;
+    }
     // THE OCCUPANCY (optional, opt.occ): a 3D texture of how full each cell of the scene is, one byte a cell, x fastest
     // then y then z, over box [x0, y0, z0, width, depth, height] (Art.Occupancy builds it); patchOccupancy changes a
     // block of it (moving things). It is read smoothed. null switches it off.
@@ -1648,7 +1748,9 @@
       const night = env.model === 'night', film = !!(opt.post || night) && floatOK;
       const HD = (opt.hdr || night || opt.post) && floatOK ? hdrTargets() : null; let litT = HD ? HD.lit : lit; const litF = HD ? HD.fbo : fboLit, bl = HD ? HD.bloom : bloom, blF = HD ? HD.fboBloom : fboBloom;
       const OC = opt.occ && occTex ? opt.occ : null;
-      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null, !!SF, !!OC) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film, !!SF, !!OC), u = pl.u, sun = env.sun;
+      const DC = drawDecals(M, opt);
+      const pl = night ? nightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!nr, hmTwo, env.floor || null, !!SF, !!OC, DC) : lightProgram(!!ns, rowsOn, !!gmTex, !!lmTex, !!HD, !!nr, hmTwo, film, !!SF, !!OC, DC), u = pl.u, sun = env.sun;
+      if (DC) { gl.useProgram(pl.p); gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, decTex); gl.uniform1i(u.u_dec, 11); gl.activeTexture(gl.TEXTURE0); }
       if (OC) {
         gl.useProgram(pl.p); const st = OC.step || occCell * 0.75;
         gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_3D, occTex); gl.uniform1i(u.u_occ, 10);

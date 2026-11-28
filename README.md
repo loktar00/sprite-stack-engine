@@ -855,6 +855,18 @@ where the engine shows the picture on the canvas. Return nothing to go on with `
 `{ lit: texture }` to go on with another picture, or `{ skipPost: true }` when the game has put the frame on the
 canvas itself with its own tone curve. The engine puts its state back afterwards.
 
+**Decals.** Soft marks on the ground with a smooth edge (a pool of oil, a scorch, a stain), where the screen-door
+fade would speckle. `E.setDecalAtlas(bytes or image, w, h)` gives their pictures (RGBA, straight alpha); `E.decal(x,
+y, rot, scale, rect, tint, alpha, z)` puts one down and returns its slot (rect `[u, v, w, h]` in the atlas, scale in
+world units per atlas texel, z on `opt.ground` if not given); the slots are a ring (`E.decalCap(n)`, 1024), so the
+oldest is replaced when they are all taken; `E.decalAlpha(slot, a)` fades one, `E.clearDecals()` removes them. They
+are drawn after the slice pass, in one instanced draw, into their own target, and only where the slice pass left
+open ground or a surface facing up within `opt.decalTolerance` (1.5 art pixels) of the decal's height, so whatever
+stands on them hides them in any drawing order. The light pass lays them over the surface's colour before any
+light: the sun and its shadows, the moon, the lamps and the light map light them like the ground. With no decals
+the pass and its target do not exist. `?decals=60` in the demo (`&stress=1&decals=5000` to measure): 500 decals
+cost nothing measurable on the desktop of these tables, 5000 about 6 to 12 % of a frame.
+
 **Characters that stand still.** A rig with `idleV` set (units a second) settles its feet below that speed
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.
