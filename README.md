@@ -859,7 +859,7 @@ canvas itself with its own tone curve. The engine puts its state back afterwards
 fade would speckle. `E.setDecalAtlas(bytes or image, w, h)` gives their pictures (RGBA, straight alpha); `E.decal(x,
 y, rot, scale, rect, tint, alpha, z)` puts one down and returns its slot (rect `[u, v, w, h]` in the atlas, scale in
 world units per atlas texel, z on `opt.ground` if not given); the slots are a ring (`E.decalCap(n)`, 1024), so the
-oldest is replaced when they are all taken; `E.decalAlpha(slot, a)` fades one, `E.clearDecals()` removes them. They
+oldest is replaced when they are all taken; `E.decalAlpha(slot, a)` fades one, `E.decalScale(slot, s)` resizes one (a pool that spreads), `E.decalSet(slot, ...)` changes any of it (same arguments as `decal`, undefined keeps), `E.clearDecals()` removes them. They
 are drawn after the slice pass, in one instanced draw, into their own target, and only where the slice pass left
 open ground or a surface facing up within `opt.decalTolerance` (1.5 art pixels) of the decal's height, so whatever
 stands on them hides them in any drawing order. The light pass lays them over the surface's colour before any

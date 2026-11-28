@@ -353,13 +353,13 @@
   uniform sampler2D u_dtex, u_g0, u_g1; uniform vec2 u_dsz; uniform float u_dtol, u_ground;
   in vec2 v_uv; flat in vec4 v_tint; flat in float v_z; out vec4 o;
   void main() {
+    vec4 t = texture(u_dtex, v_uv / u_dsz);
+    float a = t.a * v_tint.a; if (a < 0.002) discard;       // (first: most of a soft decal's quad is clear)
     ivec2 px = ivec2(gl_FragCoord.xy); vec4 g0 = texelFetch(u_g0, px, 0);
     if (g0.r > 0.0) {                                       // a slice is here: only its top near the decal's height takes it
       vec4 g1 = texelFetch(u_g1, px, 0); float h = (g1.r * 65280.0 + g1.g * 255.0) / 65535.0 * ${HMAX}.0;
       if (abs(h - v_z) > u_dtol || g0.a * 2.0 - 1.0 < 0.5) discard;
     } else if (abs(u_ground - v_z) > u_dtol) discard;       // open ground is at its own height
-    vec4 t = texture(u_dtex, v_uv / u_dsz);
-    float a = t.a * v_tint.a; if (a < 0.002) discard;
     o = vec4(t.rgb * v_tint.rgb * a, a);                    // premultiplied
   }`;
   const FS_LIGHT = `#version 300 es
@@ -1404,6 +1404,16 @@
       decData[o + 8] = tint ? tint[0] : 1; decData[o + 9] = tint ? tint[1] : 1; decData[o + 10] = tint ? tint[2] : 1; decData[o + 11] = alpha === undefined ? 1 : alpha; decData[o + 12] = scale || 1;
       decDirty = true; return i;
     };
+    // E.decalSet(slot, x, y, rot, scale, rect, tint, alpha, z): change any of a placed decal (a pool that spreads, a
+    // mark that moves); E.decalScale(slot, scale) just its size. Arguments left undefined keep what the slot has.
+    E.decalSet = function (slot, x, y, rot, scale, rect, tint, alpha, z) {
+      if (!(slot >= 0 && slot < decCap)) return; const o = slot * 13;
+      if (x !== undefined) decData[o] = x; if (y !== undefined) decData[o + 1] = y; if (z !== undefined) decData[o + 2] = z; if (rot !== undefined) decData[o + 3] = rot;
+      if (rect) { decData[o + 4] = rect[0]; decData[o + 5] = rect[1]; decData[o + 6] = rect[2]; decData[o + 7] = rect[3]; }
+      if (tint) { decData[o + 8] = tint[0]; decData[o + 9] = tint[1]; decData[o + 10] = tint[2]; }
+      if (alpha !== undefined) decData[o + 11] = alpha; if (scale !== undefined) decData[o + 12] = scale; decDirty = true;
+    };
+    E.decalScale = function (slot, scale) { if (slot >= 0 && slot < decCap) { decData[slot * 13 + 12] = scale; decDirty = true; } };
     E.decalAlpha = function (slot, alpha) { if (slot >= 0 && slot < decCap) { decData[slot * 13 + 11] = alpha; decDirty = true; } };
     E.clearDecals = function () { decN = 0; decHead = 0; decDirty = true; };
     E.decalCount = function () { return decN; };
