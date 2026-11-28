@@ -46,6 +46,8 @@
     //   piece   the longest move walked in one go, longer ones are cut into pieces (a sixth of a stride)
     //   jump    a move longer than this is a jump, not a walk (two strides; see step)
     //   reachK  no foot is left further from its hip on the ground than this share of thigh + shin (0.8)
+    //   replant true: the reach guard (replant, below) runs after every step, not only after a long move: for a rig
+    //           whose hips stand nearly as high as its legs reach, where a foot in its swing can be out of reach
   };
 
   function createWalker(cfg) {
@@ -77,7 +79,8 @@
     for (let i = 1; i <= n; i++) step(w, x0 + (x - x0) * i / n, y0 + (y - y0) * i / n, h, (dt || 1 / 60) / n);
     replant(w, h);
   }
-  // Put back under its hip any foot left further from it than the leg reaches, and keep the hips low enough.
+  // Put back under its hip any foot left further from it than the leg reaches, and keep the hips low enough for
+  // every foot, the swinging ones too (Rig.replant, for a game that wants it at a time of its own).
   function replant(w, h) {
     const c = w.c, flat = (c.thigh + c.shin) * (c.reachK || 0.8); let far = 0;
     for (let i = 0; i < 2; i++) {
@@ -123,6 +126,7 @@
     const want = Math.min(c.standHip, most);
     w.hipZ += (want - w.hipZ) * Math.min(1, (dt || 1 / 60) * 14);
     if (w.hipZ > most) w.hipZ = most;
+    if (c.replant) replant(w, h);
   }
 
   // Settling: a lifted foot comes down under its hip, and a planted foot that the hips have turned or moved away
@@ -146,6 +150,7 @@
       }
     }
     w.hipZ += (c.standHip - w.hipZ) * Math.min(1, dt * 10);
+    if (c.replant) replant(w, h);
   }
 
   // Everything a drawing needs, as plain data: joints are [x, y, z]. arms is empty when the character has none.
@@ -171,5 +176,5 @@
 
   // teleport: the same as place (stand the walker at (x, y) facing h, both feet under its hips): for a figure that
   // jumps, appears, or was not drawn for a while
-  global.Rig = { solveTwoBone: solveTwoBone, createWalker: createWalker, place: place, teleport: place, step: step, pose: pose, DEFAULTS: DEFAULTS };
+  global.Rig = { solveTwoBone: solveTwoBone, createWalker: createWalker, place: place, teleport: place, step: step, replant: function (w) { replant(w, w.h); }, pose: pose, DEFAULTS: DEFAULTS };
 })(window);

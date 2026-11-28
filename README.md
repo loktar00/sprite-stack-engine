@@ -877,7 +877,10 @@ out to it. Now a move longer than a sixth of a stride (`piece`) is walked in pie
 (`jump`) is a jump: the figure is stood a stride back along its way and walks that in, so it arrives in step; and no
 foot is left further from its hip than 80 % of the leg (`reachK`). Walked 600 frames at a time, a 14-unit leg
 reached 12.4 units at most (it reached 190 before). Short moves take exactly the path they did, at the same speed.
-`Rig.teleport(w, x, y, h)` (the same as `place`) stands a figure somewhere with no walk at all.
+`Rig.teleport(w, x, y, h)` (the same as `place`) stands a figure somewhere with no walk at all. A rig whose hips stand nearly as
+high as its legs reach can set `replant: true`: the same guard then runs after every step, keeping the hips low
+enough for the swinging foot too (a 16.4-unit leg on 16.6-unit hips stretched to 22 units without it, 16.5 with it,
+at any frame rate). It is off by default because it moves the hips of rigs that never needed it.
 
 What it costs, on the street view and the overview at dusk, 1920 by 1080, on an RTX 5090
 (`python tools/bench.py --hordes`). Milliseconds are whole frames, the demo's own moving of the vehicles
