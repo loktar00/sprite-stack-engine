@@ -871,6 +871,14 @@ cost nothing measurable on the desktop of these tables, 5000 about 6 to 12 % of 
 instead of walking on the spot: a lifted foot comes down, and a foot that the hips have turned away from steps
 back under them. Off by default.
 
+**Long moves.** A planted foot stays at its point on the ground until the step clock lifts it, so one `Rig.step` call
+that covered a long way (a slow frame, a fast-forward, a hidden tab) used to leave it metres behind, the leg drawn
+out to it. Now a move longer than a sixth of a stride (`piece`) is walked in pieces, a move longer than two strides
+(`jump`) is a jump: the figure is stood a stride back along its way and walks that in, so it arrives in step; and no
+foot is left further from its hip than 80 % of the leg (`reachK`). Walked 600 frames at a time, a 14-unit leg
+reached 12.4 units at most (it reached 190 before). Short moves take exactly the path they did, at the same speed.
+`Rig.teleport(w, x, y, h)` (the same as `place`) stands a figure somewhere with no walk at all.
+
 What it costs, on the street view and the overview at dusk, 1920 by 1080, on an RTX 5090
 (`python tools/bench.py --hordes`). Milliseconds are whole frames, the demo's own moving of the vehicles
 included; the CPU column is the engine's part of one frame (culling, building and sorting the instances).

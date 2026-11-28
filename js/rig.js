@@ -42,6 +42,10 @@
     spine: 9.5,               // from the hips up to the shoulders (or to the top of a body without arms)
     arms: true, shoulderHalf: 7.5, upperArm: 4.6, foreArm: 4.6, armSwing: 0.55,
     idleV: 0                  // below this speed (units a second) the feet settle instead of walking (0: off; see settle)
+    // Also read if a character sets them (not defaulted here: a walker with more fields read slower, measured):
+    //   piece   the longest move walked in one go, longer ones are cut into pieces (a sixth of a stride)
+    //   jump    a move longer than this is a jump, not a walk (two strides; see step)
+    //   reachK  no foot is left further from its hip on the ground than this share of thigh + shin (0.8)
   };
 
   function createWalker(cfg) {
@@ -60,8 +64,32 @@
   }
 
   // Move the body to (x, y) facing h. Call once per fixed time step; dt only smooths the hip height.
+  // One call can cover a long move (a slow frame, a fast-forward, a hidden tab): a planted foot stays at its point
+  // until the step clock lifts it, so a long move in one go would leave it metres behind with the leg drawn out to
+  // it. So a move longer than c.piece is walked in pieces (the gait is the same at any frame rate); a move longer
+  // than c.jump is not walked at all: the figure is stood a stride back along its way and walks that in, so it
+  // arrives in step; and afterwards no foot is left further from its hip than the leg reaches (c.reachK).
+  // A short move, as at a normal frame rate, takes exactly the path it always did.
+  function longMove(w, x, y, h, dt, d) {
+    const c = w.c, piece = c.piece > 0 ? c.piece : c.stride / 6, jump = c.jump > 0 ? c.jump : c.stride * 2; let x0 = w.x, y0 = w.y;
+    if (d > jump) { const b = Math.min(d, c.stride); x0 = x - (x - x0) / d * b; y0 = y - (y - y0) / d * b; d = b; place(w, x0, y0, h); }
+    const n = Math.ceil(d / piece * 1.0001);      // (each piece a hair under the limit, so step walks it)
+    for (let i = 1; i <= n; i++) step(w, x0 + (x - x0) * i / n, y0 + (y - y0) * i / n, h, (dt || 1 / 60) / n);
+    replant(w, h);
+  }
+  // Put back under its hip any foot left further from it than the leg reaches, and keep the hips low enough.
+  function replant(w, h) {
+    const c = w.c, flat = (c.thigh + c.shin) * (c.reachK || 0.8); let far = 0;
+    for (let i = 0; i < 2; i++) {
+      const f = w.feet[i], g = hipGround(w, i, h);
+      if (Math.hypot(f.x - g[0], f.y - g[1]) > flat) { f.x = g[0]; f.y = g[1]; f.z = 0; f.rot = h; f.planted = true; f.st = 0; f.fx = g[0]; f.fy = g[1]; f.frot = h; }
+      far = Math.max(far, Math.hypot(f.x - g[0], f.y - g[1]));
+    }
+    const reach = c.thigh + c.shin - 0.3, most = c.ankle + Math.sqrt(Math.max(1, reach * reach - far * far)); if (w.hipZ > most) w.hipZ = most;
+  }
   function step(w, x, y, h, dt) {
     const c = w.c, mx = x - w.x, my = y - w.y, dist = Math.hypot(mx, my);
+    if (dist > (c.piece > 0 ? c.piece : c.stride / 6)) { longMove(w, x, y, h, dt, dist); return; }      // (a long move: see above)
     // Standing, shuffling or turning on the spot: the distance clock would freeze with a foot in the air (a run's
     // duty is under 0.5, so both can be), and planted feet would stay put while the hips turn over them (crossed
     // legs). Below idleV the feet settle instead (off unless the character sets it).
@@ -141,5 +169,7 @@
     return P;
   }
 
-  global.Rig = { solveTwoBone: solveTwoBone, createWalker: createWalker, place: place, step: step, pose: pose, DEFAULTS: DEFAULTS };
+  // teleport: the same as place (stand the walker at (x, y) facing h, both feet under its hips): for a figure that
+  // jumps, appears, or was not drawn for a while
+  global.Rig = { solveTwoBone: solveTwoBone, createWalker: createWalker, place: place, teleport: place, step: step, pose: pose, DEFAULTS: DEFAULTS };
 })(window);
